@@ -87,9 +87,20 @@ _ICON_PATHS = {
     'plus': '<path d="M8 3.5v9M3.5 8h9"/>',
     'clip': '<path d="M11.6 6.4 7 11a2.5 2.5 0 0 1-3.5-3.5l5.2-5.2a1.7 1.7 0 0 1 2.4 2.4l-5.2 5.2'
             'a.9.9 0 0 1-1.2-1.2l4.6-4.6"/>',
+    # Open, and rotated 90° by CSS when it is closed. It used to be the text
+    # glyphs ▲ and ►, which iOS renders from a fallback font with metrics of
+    # its own — they arrived on the phone stretched flat.
+    'caret': '<path d="M4 10.5 8 6.5l4 4"/>',
+    # Three depths, one glyph each: how far down the chart is unfolded.
+    'level-groups': '<path d="M2.5 8h11"/>',
+    'level-projects': '<path d="M2.5 5.5h11M6 10.5h7.5"/>',
+    'level-people': '<path d="M2.5 3.5h11M6 8h7.5M9.5 12.5h4"/>',
+    'level-details': '<path d="M2.5 2.5h11M5.5 6h8M8.5 9.5h5M11 13h2.5"/>',
     'warning': '<path d="M8 2.6 14.5 13.4h-13Z"/><path d="M8 6.6v3.2M8 11.6h.01"/>',
     'calendar': '<rect x="2.5" y="3.5" width="11" height="10" rx="1.5"/>'
                 '<path d="M2.5 6.5h11M5.5 2v3M10.5 2v3"/>',
+    'pencil': '<path d="M11.4 2.6 13.4 4.6 5.4 12.6 2.5 13.5 3.4 10.6Z"/>'
+              '<path d="M9.6 4.4 11.6 6.4"/>',
 }
 
 

@@ -53,6 +53,40 @@ def _compose(config, day, month, year, clock=None):
     return f'{result}, {clock}' if clock else result
 
 
+def format_relative(value, today=None, settings=None):
+    """
+    How far away a date is, in words: `in 9 weeks`, `tomorrow`, `2 days ago`.
+
+    A deadline is read as time remaining, not as a date to subtract from today
+    in your head — and a date that is not a date ("mid October") has no distance
+    to report, so it reports none.
+    """
+    today = today or date.today()
+    when = _as_datetime(value)
+    if when is None:
+        return ''
+
+    days = (when.date() - today).days
+    if days == 0:
+        return 'today'
+    if days == 1:
+        return 'tomorrow'
+    if days == -1:
+        return 'yesterday'
+
+    ahead = days > 0
+    days = abs(days)
+    if days < 14:
+        amount = f'{days} days'
+    elif days < 60:
+        amount = f'{round(days / 7)} weeks'
+    elif days < 365:
+        amount = f'{round(days / 30)} months'
+    else:
+        amount = f'{days / 365:.1f} years'.replace('.0 ', ' ')
+    return f'in {amount}' if ahead else f'{amount} ago'
+
+
 # ─── Tiers ───────────────────────────────────────────────────────────────────
 def tier_key(project, settings=None):
     config = _settings(settings)
@@ -304,29 +338,95 @@ def chart_spans(projects, settings=None):
     return spans
 
 
+# ─── The window the chart is drawn through ──────────────────────────────────
+# What the toolbar offers, in the order it offers it. `all` is the whole span
+# the cards describe; a plain YYYY-MM-DD starts the scale on that day.
+RANGE_TODAY, RANGE_30D, RANGE_YEAR, RANGE_ALL = 'today', '30d', 'year', 'all'
+RANGES = (RANGE_TODAY, RANGE_30D, RANGE_YEAR, RANGE_ALL)
+
+
+def resolve_zoom(value):
+    """
+    (column width, key) for a `zoom=` value.
+
+    A column is always one working day; the zoom decides how wide it is drawn,
+    and the header decides what it can still say at that width.
+    """
+    key = str(value or '').strip().lower()
+    if key not in settings_module.ZOOM_LEVELS:
+        key = settings_module.DEFAULT_ZOOM
+    return settings_module.ZOOM_LEVELS[key], key
+
+
+def resolve_range(value, today=None):
+    """
+    (start, end, key) for a `from=` value.
+
+    Anything unrecognised is today: the chart opening on live work is the one
+    default worth defending, and a typo in a URL should not undo it.
+    """
+    today = today or date.today()
+    text = str(value or '').strip().lower()
+
+    if text == RANGE_ALL:
+        return None, None, RANGE_ALL
+    if text == RANGE_30D:
+        return today - timedelta(days=30), None, RANGE_30D
+    if text == RANGE_YEAR:
+        return date(today.year, 1, 1), date(today.year, 12, 31), RANGE_YEAR
+
+    match = _ISO_DATE_RE.match(text)
+    if match:
+        try:
+            chosen = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        except ValueError:
+            return today, None, RANGE_TODAY
+        return chosen, None, chosen.isoformat()
+
+    return today, None, RANGE_TODAY
+
+
 # ─── Timeline calendar ───────────────────────────────────────────────────────
 class Timeline:
     """Working days, grouped months and bar geometry for the gantt chart."""
 
-    def __init__(self, tasks, *, settings=None, col_width=None, hide_past=False, today=None):
+    def __init__(self, tasks, *, settings=None, col_width=None, today=None,
+                 start_from=None, end_at=None, horizon=0):
         config = _settings(settings)
         self.col_width = col_width or settings_module.COL_W
         self.today = today or date.today()
-        self.hide_past = hide_past
-        self.days = self._build_days(tasks, config.chart_min_end, hide_past, self.today)
+        self.start_from = start_from
+        self.end_at = end_at
+        self.days = self._build_days(tasks, config.chart_min_end, self.today,
+                                     start_from, end_at, horizon)
         self.months = self._group_months(self.days)
+        self.years = self._group_years(self.days)
         self.width = len(self.days) * self.col_width
 
     @staticmethod
-    def _build_days(tasks, min_end, hide_past, today):
+    def _build_days(tasks, min_end, today, start_from=None, end_at=None, horizon=0):
+        """
+        Every working day the chart draws, inside the window it was asked for.
+
+        The scale is built from what the cards describe and then cut to the
+        window, rather than the other way round: a window that happens to catch
+        no work still has to draw something, so an empty cut falls back to a
+        month from where the window starts.
+        """
         bounds = [task['start'] for task in tasks] + [task['end'] for task in tasks]
         if not bounds:
-            reference = datetime.combine(today, datetime.min.time())
+            reference = datetime.combine(start_from or today, datetime.min.time())
             bounds = [reference, reference + timedelta(days=30)]
 
         start = min(bounds)
         start -= timedelta(days=start.weekday())            # snap to Monday
         end = max(max(bounds), datetime.combine(min_end, datetime.min.time()))
+        # A zoomed-out scale keeps going past the last bar: the window is the
+        # one thing allowed to say where the chart stops, so a window with an
+        # end of its own is left alone.
+        if horizon and not end_at:
+            end = max(end, datetime.combine(today, datetime.min.time())
+                      + timedelta(days=horizon))
 
         days, cursor = [], start
         while cursor <= end:
@@ -334,9 +434,35 @@ class Timeline:
                 days.append(cursor)
             cursor += timedelta(days=1)
 
-        if hide_past:
-            days = [day for day in days if day.date() >= today]
-        return days
+        if start_from:
+            days = [day for day in days if day.date() >= start_from]
+        if end_at:
+            days = [day for day in days if day.date() <= end_at]
+        if days:
+            return days
+
+        cursor = datetime.combine(start_from or today, datetime.min.time())
+        fallback = []
+        while len(fallback) < 22:                           # about a month of work
+            if cursor.weekday() < 5:
+                fallback.append(cursor)
+            cursor += timedelta(days=1)
+        return fallback
+
+    @staticmethod
+    def _group_years(days):
+        """(year, number of days) runs, for the row above the months."""
+        years, current, count = [], None, 0
+        for day in days:
+            if day.year != current:
+                if current:
+                    years.append((current, count))
+                current, count = day.year, 1
+            else:
+                count += 1
+        if current:
+            years.append((current, count))
+        return years
 
     @staticmethod
     def _group_months(days):

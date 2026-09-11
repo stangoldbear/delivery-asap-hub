@@ -15,10 +15,13 @@
 
   var STATE_KEY = 'dah_ui_state';
   var LABEL_W_KEY = 'dah_label_width';
-  var HIDE_PAST_KEY = 'dah_hide_past';
+  var WINDOW_KEY = 'dah_window';
+  var ZOOM_KEY = 'dah_zoom';
+  var SCROLL_KEY = 'dah_scroll';   // per tab: where you were, not how you work
+  var SURFACE_KEY = 'dah_surface';
   var PREFS_KEY = 'dah_prefs';
-  var CARET_OPEN = '▲';
-  var CARET_CLOSED = '►';
+  var THEME_KEY = 'dah_theme';   // written here, read by theme.js before paint
+
 
   /* ─── Toast: make errors visible instead of failing silently ───────────── */
   var Toast = {
@@ -42,16 +45,32 @@
     success: function (message) { this.show(message, 'info'); }
   };
 
+  /* Only our own errors. A bare "Script error." with no source is the browser
+     refusing to describe something thrown by another origin — a translator, a
+     content blocker, any injected script — and blaming the app for it is both
+     a lie and a scare. What is ours is reported with the line it happened on,
+     because the phone is where these are found and there is no console there. */
   window.addEventListener('error', function (event) {
-    Toast.error('JS error: ' + (event.message || 'unknown'));
+    if (!event.filename || event.filename.indexOf(location.origin) !== 0) return;
+    var where = event.filename.replace(location.origin, '');
+    Toast.error('JS error: ' + (event.message || 'unknown') +
+      ' (' + where + ':' + (event.lineno || 0) + ')');
+  });
+
+  window.addEventListener('unhandledrejection', function (event) {
+    var reason = event.reason;
+    if (reason && reason.__reported) return;      // the API client already said so
+    Toast.error('Unhandled: ' + ((reason && reason.message) || reason || 'unknown'));
   });
 
   /* ─── DOM helpers ───────────────────────────────────────────────────────── */
   function byId(id) { return document.getElementById(id); }
   function all(selector) { return Array.prototype.slice.call(document.querySelectorAll(selector)); }
   function isHidden(node) { return !node || node.style.display === 'none'; }
+  /* The caret is an SVG that CSS turns; nothing here writes a glyph. */
   function setCaret(button, open) {
-    if (button) button.textContent = open ? CARET_OPEN : CARET_CLOSED;
+    var mark = button && button.querySelector('.caret');
+    if (mark) mark.classList.toggle('is-closed', !open);
   }
 
   function groupRows(group) { return all('[data-group-child="' + group + '"]'); }
@@ -68,24 +87,239 @@
      Per browser, like the collapse state and the column width: these are not
      deployment settings, they are how this person likes to be asked. */
   var Prefs = {
-    values: { save: true, cancel: true },
+    values: { save: true, cancel: true, weekdays: false, tiers: true, rails: true },
 
     load: function () {
       try {
         var stored = JSON.parse(localStorage.getItem(PREFS_KEY) || 'null');
         if (stored) {
-          if (typeof stored.save === 'boolean') this.values.save = stored.save;
-          if (typeof stored.cancel === 'boolean') this.values.cancel = stored.cancel;
+          Object.keys(this.values).forEach(function (name) {
+            if (typeof stored[name] === 'boolean') Prefs.values[name] = stored[name];
+          });
         }
       } catch (err) { /* defaults */ }
       all('[data-pref]').forEach(function (box) {
-        box.checked = Prefs.values[box.dataset.pref] !== false;
+        box.checked = !!Prefs.values[box.dataset.pref];
       });
+      this.apply();
     },
 
     set: function (name, value) {
       this.values[name] = value;
       try { localStorage.setItem(PREFS_KEY, JSON.stringify(this.values)); } catch (err) { /* noop */ }
+      this.apply();
+    },
+
+    /* Three of them are pieces of the page rather than questions it asks: the
+       row of weekday letters, the group headings, and the coloured rail. The
+       stylesheet does the work; this only says which. */
+    apply: function () {
+      var root = document.documentElement;
+      root.toggleAttribute('data-weekdays', !!this.values.weekdays);
+      root.toggleAttribute('data-no-tiers', !this.values.tiers);
+      root.toggleAttribute('data-no-rails', !this.values.rails);
+      // Groups is a depth level that shows nothing but the bands: with the
+      // bands gone it would leave an empty chart, so it steps down one.
+      if (!this.values.tiers && Depth.current() === 'groups') Depth.set('projects');
+    }
+  };
+
+  /* ─── Surfaces ──────────────────────────────────────────────────────────────
+     Below 900px the page shows one surface at a time, chosen from the bar at
+     the bottom. Above it every surface is visible at once and none of this
+     does anything — the attribute is simply ignored by the stylesheet. */
+  function narrow() {
+    return !!(window.matchMedia && window.matchMedia('(max-width: 900px)').matches);
+  }
+
+  var Surface = {
+    set: function (name, persist) {
+      document.documentElement.dataset.view = name;
+      syncPanels();                // an open panel follows you to this surface
+      // A hidden chart has no width, so its edges could not be measured until
+      // it was on screen: they are measured the moment it is.
+      ChartEdges.sync();
+      if (persist !== false) {
+        try { localStorage.setItem(SURFACE_KEY, name); } catch (err) { /* noop */ }
+      }
+      this.show();
+      window.scrollTo(0, 0);
+    },
+
+    show: function () {
+      var current = document.documentElement.dataset.view || 'projects';
+      all('.tabbar__tab').forEach(function (tab) {
+        tab.classList.toggle('tabbar__tab--active', tab.dataset.surfaceTab === current);
+      });
+    },
+
+    restore: function () {
+      var stored = null;
+      try { stored = localStorage.getItem(SURFACE_KEY); } catch (err) { /* noop */ }
+      document.documentElement.dataset.view = stored || 'projects';
+      this.show();
+    }
+  };
+
+  /* ─── Theme ─────────────────────────────────────────────────────────────────
+     The system preference decides until this says otherwise. `theme.js` puts
+     the stored choice on <html> before the first paint; all that is left here
+     is changing it and showing which one is on. */
+  var Theme = {
+    current: function () {
+      return document.documentElement.getAttribute('data-theme') || 'system';
+    },
+
+    set: function (theme) {
+      if (theme === 'system') document.documentElement.removeAttribute('data-theme');
+      else document.documentElement.setAttribute('data-theme', theme);
+      try {
+        if (theme === 'system') localStorage.removeItem(THEME_KEY);
+        else localStorage.setItem(THEME_KEY, theme);
+      } catch (err) { /* it still applies to this page */ }
+      this.show();
+    },
+
+    show: function () {
+      var current = this.current();
+      var known = ['system', 'light', 'dark'];
+      all('#theme-switch .tab[data-theme]').forEach(function (tab) {
+        tab.classList.toggle('tab--active', tab.dataset.theme === current);
+      });
+
+      var more = byId('theme-more');
+      if (!more) return;
+      var gallery = known.indexOf(current) === -1;
+      more.classList.toggle('tab--active', gallery);
+      more.textContent = gallery ? (this.nameOf(current) || current) : 'More…';
+    },
+
+    /* The gallery is read back out of the stylesheet that declares it: a theme
+       exists because `themes.css` gives it a name, and there is no second list
+       here to fall out of step with it. */
+    catalogue: function () {
+      var found = [];
+      Array.prototype.forEach.call(document.styleSheets, function (sheet) {
+        var rules;
+        try { rules = sheet.cssRules; } catch (err) { return; }   // not ours to read
+        Array.prototype.forEach.call(rules, function (rule) {
+          var match = rule.selectorText &&
+            rule.selectorText.match(/^:root\[data-theme="([a-z0-9-]+)"\]$/);
+          if (!match) return;
+          var name = (rule.style.getPropertyValue('--theme-name') || '').trim()
+            .replace(/^["']|["']$/g, '');
+          if (!name) return;                    // `dark` has its own button
+          found.push({
+            key: match[1],
+            name: name,
+            mode: (rule.style.getPropertyValue('--theme-mode') || 'dark').trim()
+              .replace(/^["']|["']$/g, ''),
+            background: rule.style.getPropertyValue('--background').trim(),
+            foreground: rule.style.getPropertyValue('--foreground').trim(),
+            muted: rule.style.getPropertyValue('--muted-foreground').trim(),
+            ring: rule.style.getPropertyValue('--ring').trim(),
+            warning: rule.style.getPropertyValue('--warning').trim()
+          });
+        });
+      });
+      return found;
+    },
+
+    nameOf: function (key) {
+      var match = this.catalogue().find(function (theme) { return theme.key === key; });
+      return match ? match.name : '';
+    },
+
+    /* Each entry previews itself with its own tokens: the swatch is the theme. */
+    gallery: function () {
+      var themes = this.catalogue();
+      if (!themes.length) return Toast.error('No extra theme is available.');
+
+      var overlay = document.createElement('div');
+      overlay.className = 'dialog-overlay';
+
+      var box = document.createElement('div');
+      box.className = 'dialog dialog--wide';
+      box.setAttribute('role', 'dialog');
+      box.setAttribute('aria-modal', 'true');
+
+      var title = document.createElement('h3');
+      title.className = 'dialog__title';
+      title.textContent = 'Themes';
+
+      var body = document.createElement('p');
+      body.className = 'dialog__body';
+      body.textContent = 'Only the colours change: the layout, the spacing and ' +
+        'every control stay exactly where they are.';
+
+      var self = this;
+      function close() { overlay.remove(); Dialog.open = null; }
+
+      var sections = document.createElement('div');
+      sections.className = 'theme-sections';
+      var grids = {};
+
+      /* Dark and light are two different decisions, so they are two lists
+         rather than one list you have to read the swatches of. */
+      [['dark', 'Dark'], ['light', 'Light']].forEach(function (pair) {
+        if (!themes.some(function (theme) { return theme.mode === pair[0]; })) return;
+        var heading = document.createElement('div');
+        heading.className = 'theme-section__title';
+        heading.textContent = pair[1];
+        var grid = document.createElement('div');
+        grid.className = 'theme-grid';
+        grids[pair[0]] = grid;
+        sections.append(heading, grid);
+      });
+
+      themes.forEach(function (theme) {
+        var grid = grids[theme.mode] || grids.dark;
+        var card = document.createElement('button');
+        card.type = 'button';
+        card.className = 'theme-card';
+        card.style.background = 'hsl(' + theme.background + ')';
+        card.style.color = 'hsl(' + theme.foreground + ')';
+        if (self.current() === theme.key) card.classList.add('theme-card--active');
+
+        var strip = document.createElement('span');
+        strip.className = 'theme-card__strip';
+        [theme.ring, theme.warning, theme.muted].forEach(function (colour) {
+          var dot = document.createElement('span');
+          dot.className = 'theme-card__dot';
+          dot.style.background = 'hsl(' + colour + ')';
+          strip.appendChild(dot);
+        });
+
+        var name = document.createElement('span');
+        name.className = 'theme-card__name';
+        name.textContent = theme.name;
+
+        card.append(strip, name);
+        card.addEventListener('click', function () {
+          self.set(theme.key);
+          close();
+        });
+        grid.appendChild(card);
+      });
+
+      var actions = document.createElement('div');
+      actions.className = 'dialog__actions';
+      var done = document.createElement('button');
+      done.type = 'button';
+      done.className = 'btn btn--secondary btn--sm';
+      done.textContent = 'Close';
+      done.addEventListener('click', close);
+      actions.appendChild(done);
+
+      overlay.addEventListener('mousedown', function (event) {
+        if (event.target === overlay) close();
+      });
+
+      box.append(title, body, sections, actions);
+      overlay.appendChild(box);
+      document.body.appendChild(overlay);
+      Dialog.open = close;
+      done.focus();
     }
   };
 
@@ -169,18 +403,19 @@
         };
 
         all('.tier-row').forEach(function (row) {
-          var group = row.dataset.group;
-          if (group && groupRows(group).some(isHidden)) state.collapsedGroups.push(group);
+          if (row.dataset.group && row.classList.contains(COLLAPSED)) {
+            state.collapsedGroups.push(row.dataset.group);
+          }
         });
 
         all('.project-main-row').forEach(function (row) {
-          var pid = row.dataset.projId;
-          var rows = projectRows(pid);
-          if (pid && rows.length && rows.every(isHidden)) state.collapsedProjects.push(pid);
+          if (row.dataset.projId && row.classList.contains(COLLAPSED)) {
+            state.collapsedProjects.push(row.dataset.projId);
+          }
         });
 
         all('.detail-row').forEach(function (row) {
-          if (!isHidden(row)) state.openDetailPanels.push(row.dataset.projId);
+          if (row.classList.contains(OPEN)) state.openDetailPanels.push(row.dataset.projId);
         });
 
         all('.history-box').forEach(function (box) {
@@ -203,14 +438,153 @@
       if (!state) return;
 
       if (state.globalTodosCollapsed) setGlobalTodos(false, false);
-      (state.collapsedGroups || []).forEach(function (group) { setGroup(group, false, false); });
-      (state.collapsedProjects || []).forEach(function (pid) { setProject(pid, false, false); });
-      (state.openDetailPanels || []).forEach(function (pid) { setDetail(pid, true, false); });
+      (state.collapsedGroups || []).forEach(function (group) {
+        var row = groupRow(group);
+        if (row) row.classList.add(COLLAPSED);
+        setCaret(byId('btn-group-' + group), false);
+      });
+      (state.collapsedProjects || []).forEach(function (pid) {
+        var row = projectRow(pid);
+        if (row) row.classList.add(COLLAPSED);
+        setCaret(byId('btn-toggle-proj-' + pid), false);
+      });
+      (state.openDetailPanels || []).forEach(function (pid) {
+        var panel = detailRow(pid);
+        if (panel) panel.classList.add(OPEN);
+      });
       (state.openHistories || []).forEach(function (pid) { setHistory(pid, true, false); });
+      applyVisibility();
+      syncPanels();
     }
   };
 
-  /* ─── Visibility primitives (explicit setters: no implicit state) ───────── */
+  /* ─── Visibility ────────────────────────────────────────────────────────────
+     Three flags, each a class on the row that owns it, and one function that
+     turns them into `display`. The state used to be read back from `display`
+     itself, which cannot survive a collapsed group hiding a project whose own
+     collapse has to be remembered — and that is exactly what the depth levels
+     ask of it. */
+  var COLLAPSED = 'is-collapsed';
+  var OPEN = 'is-open';
+
+  function groupRow(group) {
+    return document.querySelector('.tier-row[data-group="' + CSS.escape(group) + '"]');
+  }
+
+  function projectRow(pid) {
+    return document.querySelector('.project-main-row[data-proj-id="' + CSS.escape(pid) + '"]');
+  }
+
+  function groupCollapsed(group) {
+    var row = groupRow(group);
+    return !!row && row.classList.contains(COLLAPSED);
+  }
+
+  function projectCollapsed(pid) {
+    var row = projectRow(pid);
+    return !!row && row.classList.contains(COLLAPSED);
+  }
+
+  function detailOpen(pid) {
+    var row = detailRow(pid);
+    return !!row && row.classList.contains(OPEN);
+  }
+
+  function applyVisibility() {
+    all('.project-main-row').forEach(function (row) {
+      row.style.display = groupCollapsed(row.dataset.groupChild) ? 'none' : '';
+    });
+    all('.resource-sub-row').forEach(function (row) {
+      row.style.display = (groupCollapsed(row.dataset.groupChild) ||
+                           projectCollapsed(row.dataset.projChild)) ? 'none' : '';
+    });
+    all('.detail-row').forEach(function (row) {
+      var shown = row.classList.contains(OPEN) && !groupCollapsed(row.dataset.detailGroup);
+      // A panel adopted by a card in the list is a block, not a table row.
+      row.style.display = shown
+        ? (row.classList.contains('detail-row--inline') ? 'block' : 'table-row')
+        : 'none';
+      // The row the panel belongs to says so, so the two read as one block
+      // rather than as a card that happens to sit between two projects.
+      var owner = projectRow(row.dataset.projId);
+      if (owner) owner.classList.toggle('has-panel', shown);
+    });
+    Depth.show();
+  }
+
+  /* ─── Where a panel lives ───────────────────────────────────────────────────
+     The panel belongs under the project it describes. In the chart that is the
+     row it already sits in; in the list it is the card you tapped, so the node
+     moves there and comes home when it closes. One panel, two places, never an
+     overlay: an overlay per project is a pile of windows to dismiss the moment
+     anything opens more than one. */
+  var panelHome = {};
+
+  function adoptPanel(pid, host) {
+    var row = detailRow(pid);
+    if (!row || !host) return;
+    if (!panelHome[pid]) {
+      panelHome[pid] = { parent: row.parentNode, next: row.nextSibling };
+    }
+    if (row.previousElementSibling !== host) host.after(row);
+    row.classList.add('detail-row--inline');
+    if (row.style.display !== 'none') row.style.display = 'block';
+    host.classList.add('is-open');
+    host.setAttribute('aria-expanded', 'true');
+    panelHome[pid].host = host;
+  }
+
+  function returnPanel(pid) {
+    var row = detailRow(pid);
+    var home = panelHome[pid];
+    if (!row || !home) return;
+    home.parent.insertBefore(row, home.next);
+    row.classList.remove('detail-row--inline');
+    if (row.style.display !== 'none') row.style.display = 'table-row';
+    if (home.host) {
+      home.host.classList.remove('is-open');
+      home.host.setAttribute('aria-expanded', 'false');
+    }
+    delete panelHome[pid];
+  }
+
+  function returnEveryPanel() {
+    Object.keys(panelHome).forEach(returnPanel);
+  }
+
+  /* One rule: an open panel lives on the surface you are looking at. On the
+     list that is under its card; anywhere else, in the chart row it came
+     from. Called whenever either of those can have changed. */
+  function syncPanels() {
+    if (!narrow() || document.documentElement.dataset.view !== 'projects') {
+      return returnEveryPanel();
+    }
+    all('.pcard').forEach(function (card) {
+      var row = detailRow(card.dataset.project);
+      if (row && row.classList.contains(OPEN)) adoptPanel(card.dataset.project, card);
+    });
+  }
+
+  /* What the project title does depends on the width, so what it says has to
+     as well. */
+  function titleHints() {
+    var phone = narrow();
+    all('.project-title[data-action="project-title"]').forEach(function (el) {
+      el.title = el.dataset.project + (phone ? ' — open the notes of this project'
+                                             : ' — click to rename');
+    });
+  }
+
+  function setSettings(open) {
+    var overlay = byId('settings-overlay');
+    if (!overlay) return;
+    overlay.style.display = open ? 'flex' : 'none';
+    if (open) {
+      var first = overlay.querySelector('button, input');
+      if (first) first.focus();
+    }
+  }
+
   function setGlobalTodos(open, persist) {
     var box = byId('global-todos-content');
     if (!box) return;
@@ -220,41 +594,37 @@
   }
 
   function setGroup(group, open, persist) {
-    groupRows(group).forEach(function (row) { row.style.display = open ? '' : 'none'; });
+    var row = groupRow(group);
+    if (row) row.classList.toggle(COLLAPSED, !open);
     setCaret(byId('btn-group-' + group), open);
-    if (!open) {
-      all('[data-detail-group="' + group + '"]').forEach(function (row) {
-        row.style.display = 'none';
-      });
-    }
+    applyVisibility();
     if (persist !== false) UIState.save();
   }
 
   /* Collapsing a project folds away its people. The project row stays, and so
      does its panel: closing a panel is what the Close button is for. */
   function setProject(pid, open, persist) {
-    projectRows(pid).forEach(function (row) { row.style.display = open ? '' : 'none'; });
+    var row = projectRow(pid);
+    if (row) row.classList.toggle(COLLAPSED, !open);
     setCaret(byId('btn-toggle-proj-' + pid), open);
+    applyVisibility();
     if (persist !== false) UIState.save();
   }
 
   function setDetail(pid, open, persist) {
     var panel = detailRow(pid);
     if (!panel) return;
-
+    panel.classList.toggle(OPEN, open);
+    if (!open) returnPanel(pid);
+    // A panel is useless inside a collapsed group: opening one opens the band
+    // it lives in, and nothing else.
     if (open) {
-      // The panel is useless while its project row is hidden by a collapsed
-      // tier: reveal ONLY that row, never the rows (or sub-rows) of sibling
-      // projects in the same tier.
-      var row = document.querySelector('.project-main-row[data-proj-id="' + pid + '"]');
-      if (row && isHidden(row)) {
-        row.style.display = '';
-        setCaret(byId('btn-group-' + row.dataset.groupChild), true);
+      var row = projectRow(pid);
+      if (row && groupCollapsed(row.dataset.groupChild)) {
+        setGroup(row.dataset.groupChild, true, false);
       }
-      panel.style.display = 'table-row';
-    } else {
-      panel.style.display = 'none';
     }
+    applyVisibility();
     if (persist !== false) UIState.save();
   }
 
@@ -264,12 +634,106 @@
     if (!box) return;
     box.style.display = open ? 'flex' : 'none';
     if (button) {
-      var count = box.querySelectorAll('.todo-item-row').length;
-      button.textContent = 'Completed actions (' + count + ') ' +
-        (open ? CARET_OPEN : CARET_CLOSED);
+      var count = button.querySelector('.hist-count');
+      if (count) count.textContent = box.querySelectorAll('.todo-item-row').length;
+      setCaret(button, open);
     }
     if (persist !== false) UIState.save();
   }
+
+  /* ─── Depth ─────────────────────────────────────────────────────────────────
+     Three levels rather than four toggles. A toggle has to know what the chart
+     is doing right now, which is unanswerable when half of it is folded; a
+     level always means the same thing and always does it. */
+  var Depth = {
+    set: function (level) {
+      var groupsOpen = level !== 'groups';
+      var peopleOpen = level === 'people' || level === 'details';
+      var panelsOpen = level === 'details';
+      collectGroups().forEach(function (group) { setGroup(group, groupsOpen, false); });
+      collectProjects().forEach(function (pid) {
+        setProject(pid, peopleOpen, false);
+        // A level says everything about the state, panels included: that is
+        // what makes it work the same whatever was open before it.
+        setDetail(pid, panelsOpen, false);
+      });
+      UIState.save();
+    },
+
+    /* What the chart is showing, for the control to point at — and nothing at
+       all when it is halfway between two levels, which is a state a level
+       button cannot honestly claim. */
+    current: function () {
+      var groups = collectGroups();
+      if (groups.length && groups.every(groupCollapsed)) return 'groups';
+      if (groups.some(groupCollapsed)) return '';
+
+      var projects = collectProjects();
+      if (!projects.length) return 'people';
+      if (projects.every(projectCollapsed)) return 'projects';
+      if (projects.some(projectCollapsed)) return '';
+      if (projects.every(detailOpen)) return 'details';
+      if (projects.every(function (pid) { return !detailOpen(pid); })) return 'people';
+      return '';
+    },
+
+    show: function () {
+      var level = this.current();
+      all('#depth-switch .tab').forEach(function (tab) {
+        tab.classList.toggle('tab--active', tab.dataset.depth === level);
+      });
+    }
+  };
+
+  /* ─── Where you were ────────────────────────────────────────────────────────
+     A save reloads, and a reload that drops you at the top of a 3000px chart
+     costs more than the save did. The page keeps both scroll positions — the
+     document, and the chart's own horizontal one, which no browser restores —
+     in session storage, because they belong to this tab and to today only. */
+  var Scroll = {
+    timer: null,
+
+    chart: function () { return byId('gantt-scroll'); },
+
+    save: function () {
+      var chart = this.chart();
+      try {
+        sessionStorage.setItem(SCROLL_KEY, JSON.stringify({
+          y: window.scrollY || 0,
+          x: chart ? chart.scrollLeft : 0
+        }));
+      } catch (err) { /* nothing worth reporting */ }
+    },
+
+    restore: function () {
+      var stored = null;
+      try { stored = JSON.parse(sessionStorage.getItem(SCROLL_KEY) || 'null'); } catch (err) { return; }
+      if (!stored) return;
+
+      var chart = this.chart();
+      function apply() {
+        if (chart && stored.x) chart.scrollLeft = stored.x;
+        if (stored.y) window.scrollTo(0, stored.y);
+      }
+      // Once now and once after layout: the table is wide, and the first pass
+      // can land against a width the browser has not finished computing.
+      apply();
+      if (window.requestAnimationFrame) requestAnimationFrame(apply);
+    },
+
+    watch: function () {
+      var self = this;
+      function remember() {
+        clearTimeout(self.timer);
+        self.timer = setTimeout(function () { self.save(); }, 200);
+      }
+      window.addEventListener('scroll', remember, { passive: true });
+      var chart = this.chart();
+      if (chart) chart.addEventListener('scroll', remember, { passive: true });
+      // A reload can come from anywhere; the last position has to be on record.
+      window.addEventListener('beforeunload', function () { self.save(); });
+    }
+  };
 
   /* ─── API client ────────────────────────────────────────────────────────── */
   function request(method, path, body, contentType) {
@@ -288,6 +752,7 @@
       return data;
     }).catch(function (err) {
       Toast.error('Save failed: ' + err.message);
+      err.__reported = true;
       throw err;
     });
   }
@@ -477,7 +942,7 @@
   var GROUP_STATES = ['done', 'dropped'];
 
   function movesGroup(pid, status) {
-    var row = document.querySelector('.project-main-row[data-proj-id="' + CSS.escape(pid) + '"]');
+    var row = projectRow(pid);
     var current = row ? (row.querySelector('.status-pill') || {}).textContent : '';
     return GROUP_STATES.indexOf(status) !== -1 ||
       GROUP_STATES.indexOf(String(current || '').toLowerCase()) !== -1;
@@ -491,8 +956,8 @@
     if (title) title.textContent = name;
 
     var panel = detailRow(pid);
-    var heading = panel && panel.querySelector('.detail-header h4');
-    if (heading) heading.textContent = 'Notes & actions — ' + name;
+    var heading = panel && panel.querySelector('.detail-header__of');
+    if (heading) heading.textContent = 'of ' + name;
 
     var head = document.querySelector('[data-card="' + CSS.escape(pid) + '"]');
     var card = head && head.querySelector('.global-todo-card__title');
@@ -535,10 +1000,20 @@
     var actionsRow = document.createElement('div');
     actionsRow.className = 'todo-edit-actions';
 
+    /* An empty date field paints nothing at all on iOS — no format, no hint —
+       so the only thing that says what the box is for is a label beside it. */
     var deadline = document.createElement('input');
     deadline.type = 'date';
     deadline.className = 'form-input form-input--date todo-edit-dl';
+    deadline.setAttribute('aria-label', 'Due date');
     deadline.value = row.dataset.dl || '';
+
+    var due = document.createElement('label');
+    due.className = 'due-field';
+    var dueLabel = document.createElement('span');
+    dueLabel.className = 'field-label';
+    dueLabel.textContent = 'Due';
+    due.append(dueLabel, deadline);
 
     var save = document.createElement('button');
     save.type = 'button';
@@ -556,10 +1031,67 @@
     cancel.dataset.project = pid;
     cancel.dataset.todo = todoId;
 
-    actionsRow.append(deadline, save, cancel);
+    /* Reordering is a drag on a desktop, and a finger cannot drag: the note
+       being edited is already the subject, so the two steps live here. It is
+       also the first time the order could be changed from a keyboard. */
+    var moves = [-1, 1].map(function (delta) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'btn btn--outline btn--sm';
+      button.textContent = delta < 0 ? 'Up' : 'Down';
+      button.title = delta < 0 ? 'Move this note up' : 'Move this note down';
+      button.dataset.action = 'todo-move';
+      button.dataset.project = pid;
+      button.dataset.todo = todoId;
+      button.dataset.delta = String(delta);
+      button.disabled = !todoNeighbour(row, delta);
+      return button;
+    });
+
+    actionsRow.append(due, moves[0], moves[1], save, cancel);
     wrapper.append(text, actionsRow);
     row.replaceChildren(wrapper);
     text.focus();
+  }
+
+  function todoNeighbour(row, delta) {
+    var next = delta < 0 ? row.previousElementSibling : row.nextElementSibling;
+    return next && next.classList.contains('todo-item-row') ? next : null;
+  }
+
+  /* The panel's list is the one the card is written from; the aggregated
+     surface shows the same notes and has to agree with it, so the row moves
+     in every list that holds it and the order is read back from the panel. */
+  function moveTodo(pid, todoId, delta) {
+    var moved = false;
+    todoRows(pid, todoId).forEach(function (row) {
+      var neighbour = todoNeighbour(row, delta);
+      if (!neighbour) return;
+      if (delta < 0) row.parentNode.insertBefore(row, neighbour);
+      else row.parentNode.insertBefore(neighbour, row);
+      moved = true;
+    });
+    if (!moved) return;
+
+    var canonical = byId('todos-container-' + pid);
+    var order = Array.prototype.slice
+      .call(canonical.querySelectorAll('.todo-item-row'))
+      .map(function (item) { return item.dataset.todo; });
+
+    projectApi(pid, 'todo/reorder', { order: order })
+      .then(function () {
+        Toast.success('Notes reordered.');
+        refreshMoveButtons(pid, todoId);
+      })
+      .catch(function () { location.reload(); });   // put the list back as stored
+  }
+
+  function refreshMoveButtons(pid, todoId) {
+    todoRows(pid, todoId).forEach(function (row) {
+      row.querySelectorAll('[data-action="todo-move"]').forEach(function (button) {
+        button.disabled = !todoNeighbour(row, Number(button.dataset.delta));
+      });
+    });
   }
 
   function startEdit(pid, todoId) {
@@ -991,13 +1523,17 @@
     check.dataset.action = 'todo-toggle';
     check.dataset.project = pid;
     check.dataset.todo = todo.id;
+    // The label is the 44pt target the box itself is too small to be.
+    var hit = document.createElement('label');
+    hit.className = 'todo-check';
+    hit.appendChild(check);
 
     var text = document.createElement('span');
     text.className = 'todo-text' + (done ? ' done' : '');
     text.title = 'Double-click to edit';
     text.textContent = todo.text || '';
 
-    row.append(check, text);
+    row.append(hit, text);
 
     var stamp = done ? formatDateLong(todo.completed_at) : formatDateLong(todo.deadline);
     if (stamp) {
@@ -1052,9 +1588,9 @@
       var button = byId('btn-hist-' + pid);
       var history = byId('history-box-' + pid);
       if (button && history) {
-        button.textContent = 'Completed actions (' +
-          history.querySelectorAll('.todo-item-row').length + ') ' +
-          (isHidden(history) ? CARET_CLOSED : CARET_OPEN);
+        var count = button.querySelector('.hist-count');
+        if (count) count.textContent = history.querySelectorAll('.todo-item-row').length;
+        setCaret(button, !isHidden(history));
       }
     });
 
@@ -1148,19 +1684,11 @@
     confirmLabel: 'Save'
   };
 
-  /* ─── Milestones ────────────────────────────────────────────────────────────
-     One dated mark, edited in one place: the diamond on the lane, the chip in
-     the panel and an empty day in the chart all open the same overlay. */
-  function milestoneOf(pid, id) {
-    var chip = document.querySelector('#milestones-' + CSS.escape(pid) +
-      ' [data-milestone="' + CSS.escape(id) + '"]');
-    var diamond = document.querySelector('.milestone[data-project="' + CSS.escape(pid) +
-      '"][data-milestone="' + CSS.escape(id) + '"]');
-    return diamond || chip;
-  }
-
-  function openMilestone(pid, id, isoDate) {
-    var existing = id ? milestoneOf(pid, id) : null;
+  /* ─── A dialog with a form in it ────────────────────────────────────────────
+     One builder for every small edit that is not worth a panel: a milestone, a
+     timeline row, a project name. Fields in, values out, and a DELETE that
+     asks again when the caller offers one. */
+  function formDialog(options) {
     var overlay = document.createElement('div');
     overlay.className = 'dialog-overlay';
 
@@ -1171,88 +1699,198 @@
 
     var title = document.createElement('h3');
     title.className = 'dialog__title';
-    title.textContent = id ? 'Milestone' : 'New milestone';
-
-    var date = document.createElement('input');
-    date.type = 'date';
-    date.className = 'form-input';
-    date.setAttribute('aria-label', 'Milestone date');
-    date.value = isoDate || (existing ? existing.dataset.date || '' : '');
-    if (!date.value && existing) date.value = '';
-
-    var text = document.createElement('input');
-    text.type = 'text';
-    text.className = 'form-input';
-    text.placeholder = 'What happens on that day';
-    text.setAttribute('aria-label', 'Milestone text');
-    text.value = existing ? existing.dataset.text || '' : '';
+    title.textContent = options.title;
 
     var fields = document.createElement('div');
     fields.className = 'dialog__fields';
-    fields.append(date, text);
+
+    var inputs = {};
+    (options.fields || []).forEach(function (field) {
+      var label = document.createElement('label');
+      label.className = 'dialog__field';
+      var caption = document.createElement('span');
+      caption.className = 'field-label';
+      caption.textContent = field.label;
+
+      var input = document.createElement('input');
+      input.type = field.type || 'text';
+      input.className = 'form-input';
+      input.value = field.value || '';
+      if (field.placeholder) input.placeholder = field.placeholder;
+      inputs[field.key] = input;
+
+      label.append(caption, input);
+      fields.appendChild(label);
+    });
 
     var actions = document.createElement('div');
     actions.className = 'dialog__actions';
 
-    var remove = document.createElement('button');
-    remove.type = 'button';
-    remove.className = 'btn btn--ghost btn--sm btn--danger';
-    remove.textContent = 'DELETE';
-    remove.style.marginRight = 'auto';
-    if (!id) remove.hidden = true;
+    function close() { overlay.remove(); Dialog.open = null; }
+
+    if (options.onDelete) {
+      var remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'btn btn--ghost btn--sm btn--danger';
+      remove.textContent = 'DELETE';
+      remove.style.marginRight = 'auto';
+      remove.addEventListener('click', function () {
+        Dialog.confirm({
+          title: options.deleteTitle || 'Delete this?',
+          body: 'It is removed from the card on disk. This cannot be undone.',
+          confirmLabel: 'DELETE',
+          destructive: true
+        }).then(function (confirmed) {
+          if (confirmed) { close(); options.onDelete(); }
+        });
+      });
+      actions.appendChild(remove);
+    }
 
     var cancel = document.createElement('button');
     cancel.type = 'button';
     cancel.className = 'btn btn--secondary btn--sm';
     cancel.textContent = 'Cancel';
+    cancel.addEventListener('click', close);
 
     var save = document.createElement('button');
     save.type = 'button';
     save.className = 'btn btn--default btn--sm';
-    save.textContent = 'Save';
-
-    function close() { overlay.remove(); Dialog.open = null; }
-
-    cancel.addEventListener('click', close);
-    overlay.addEventListener('mousedown', function (event) {
-      if (event.target === overlay) close();
-    });
+    save.textContent = options.confirmLabel || 'Save';
     save.addEventListener('click', function () {
-      if (!date.value) return Toast.error('A milestone needs a date.');
+      var values = {};
+      Object.keys(inputs).forEach(function (key) { values[key] = inputs[key].value; });
+      var complaint = options.validate ? options.validate(values) : '';
+      if (complaint) return Toast.error(complaint);
+
       guard('save', {
-        title: 'Save this milestone?',
+        title: options.saveTitle || 'Save this change?',
         body: 'The card is rewritten on disk.',
         confirmLabel: 'Save'
       }, function () {
-        projectApi(pid, 'milestone/save', {
-          milestone_id: id || '', date: date.value, text: text.value
-        }).then(function () {
-          close();
-          location.reload();      // the mark belongs on the lane, not in a list
-        }).catch(function () { /* reported */ });
-      });
-    });
-    remove.addEventListener('click', function () {
-      Dialog.confirm({
-        title: 'Delete this milestone?',
-        body: 'It is removed from the card on disk. This cannot be undone.',
-        confirmLabel: 'DELETE',
-        destructive: true
-      }).then(function (confirmed) {
-        if (!confirmed) return;
-        projectApi(pid, 'milestone/delete', { milestone_id: id }).then(function () {
-          close();
-          location.reload();
-        }).catch(function () { /* reported */ });
+        close();
+        options.onSave(values);
       });
     });
 
-    actions.append(remove, cancel, save);
+    overlay.addEventListener('mousedown', function (event) {
+      if (event.target === overlay) close();
+    });
+    box.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter' && event.target.tagName === 'INPUT') save.click();
+    });
+
+    actions.append(cancel, save);
     box.append(title, fields, actions);
     overlay.appendChild(box);
     document.body.appendChild(overlay);
     Dialog.open = close;
-    (date.value ? text : date).focus();
+
+    var first = fields.querySelector('input');
+    if (first) first.focus();
+  }
+
+  /* ─── Milestones ────────────────────────────────────────────────────────────
+     One dated mark, edited in one place: the diamond on the lane, the chip in
+     the panel and an empty day in the chart all open the same dialog. */
+  function milestoneOf(pid, id) {
+    return document.querySelector('.milestone[data-project="' + CSS.escape(pid) +
+      '"][data-milestone="' + CSS.escape(id) + '"]') ||
+      document.querySelector('#milestones-' + CSS.escape(pid) +
+        ' [data-milestone="' + CSS.escape(id) + '"]');
+  }
+
+  function openMilestone(pid, id, isoDate) {
+    var existing = id ? milestoneOf(pid, id) : null;
+    formDialog({
+      title: id ? 'Milestone' : 'New milestone',
+      saveTitle: 'Save this milestone?',
+      deleteTitle: 'Delete this milestone?',
+      fields: [
+        { key: 'date', label: 'Date', type: 'date',
+          value: isoDate || (existing ? existing.dataset.date : '') },
+        { key: 'text', label: 'What happens that day', type: 'text',
+          value: existing ? existing.dataset.text || '' : '' }
+      ],
+      validate: function (values) {
+        return values.date ? '' : 'A milestone needs a date.';
+      },
+      onSave: function (values) {
+        projectApi(pid, 'milestone/save', {
+          milestone_id: id || '', date: values.date, text: values.text
+        }).then(function () { location.reload(); })
+          .catch(function () { /* reported */ });
+      },
+      onDelete: id ? function () {
+        projectApi(pid, 'milestone/delete', { milestone_id: id })
+          .then(function () { location.reload(); })
+          .catch(function () { /* reported */ });
+      } : null
+    });
+  }
+
+  /* ─── One timeline row ──────────────────────────────────────────────────────
+     Clicking the person in the label column edits the row they own: who it
+     belongs to, when it runs, and what it is. */
+  function openTimelineRow(line) {
+    var pid = line.dataset.project;
+    var taskId = line.dataset.task;
+    formDialog({
+      title: taskId === 'new' ? 'New timeline row' : 'Timeline row',
+      saveTitle: 'Save this row?',
+      deleteTitle: 'Delete this timeline row?',
+      fields: [
+        { key: 'who', label: 'Who', type: 'text', value: line.dataset.who || '',
+          placeholder: 'A name from the roster in settings.toml' },
+        { key: 'start', label: 'Start', type: 'date', value: line.dataset.start || '' },
+        { key: 'end', label: 'End', type: 'date', value: line.dataset.end || '' },
+        { key: 'note', label: 'Note', type: 'text', value: line.dataset.note || '',
+          placeholder: 'What this row is about' }
+      ],
+      validate: function (values) {
+        if (!values.who.trim()) return 'A timeline row needs someone to belong to.';
+        if (!values.start || !values.end) return 'A row needs a start and an end.';
+        if (values.end < values.start) return 'A row cannot end before it starts.';
+        return '';
+      },
+      onSave: function (values) {
+        projectApi(pid, 'timeline/save', {
+          task_id: taskId, who: values.who, start: values.start,
+          end: values.end, note: values.note
+        }).then(function () { location.reload(); })
+          .catch(function () { /* reported */ });
+      },
+      onDelete: taskId === 'new' ? null : function () {
+        projectApi(pid, 'timeline/delete', { task_id: taskId })
+          .then(function () { location.reload(); })
+          .catch(function () { /* reported */ });
+      }
+    });
+  }
+
+  /* ─── The project name ──────────────────────────────────────────────────────
+     Clicking the title in the chart renames the project — the same value the
+     panel edits, patched in place in the four spots it appears. */
+  function openRename(pid, current) {
+    formDialog({
+      title: 'Project name',
+      saveTitle: 'Rename this project?',
+      fields: [{ key: 'name', label: 'Name', type: 'text', value: current }],
+      validate: function (values) {
+        return values.name.trim() ? '' : 'A project needs a name.';
+      },
+      onSave: function (values) {
+        var name = values.name.trim();
+        projectApi(pid, 'update', { name: name }).then(function () {
+          renameProject(pid, name);
+          var sel = CSS.escape(pid);
+          all('[data-action="project-rename"][data-project="' + sel + '"],' +
+              '[data-action="project-title"][data-project="' + sel + '"]')
+            .forEach(function (node) { node.dataset.name = name; });
+          Toast.success('Renamed.');
+        }).catch(function () { /* reported */ });
+      }
+    });
   }
 
   /* A click on an empty day of a project lane proposes a milestone there. The
@@ -1276,13 +1914,131 @@
     if (day) openMilestone(lane.dataset.lane, '', day);
   });
 
+  /* ─── Moving a project without dragging it ──────────────────────────────────
+     HTML5 drag and drop does not exist on iOS, and a 55px row is not a drop
+     target a thumb can aim at. The same endpoint, reached by naming the move:
+     one place up, one place down, or into a band. It is also the only way a
+     keyboard has ever been able to reorder this chart. */
+  function currentOrder() {
+    return all('.gantt-table tbody > tr.project-main-row').map(function (row) {
+      return { id: row.dataset.projId, group: row.dataset.groupChild };
+    });
+  }
+
+  function groupsInOrder() {
+    return all('.tier-row').map(function (row) {
+      var title = row.querySelector('.tier-row__title');
+      return { key: row.dataset.group, title: title ? title.textContent.trim() : row.dataset.group };
+    }).filter(function (entry) { return entry.key; });
+  }
+
+  function sendOrder(order) {
+    post('/api/project/_batch/reorder', { order: order })
+      .then(function () { location.reload(); })
+      .catch(function () { /* reported */ });
+  }
+
+  /* A step takes the group of the row it swaps with, exactly as a drag past a
+     band header does. */
+  function stepProject(pid, step) {
+    var order = currentOrder();
+    var index = order.findIndex(function (entry) { return entry.id === pid; });
+    var target = index + step;
+    if (index === -1 || target < 0 || target >= order.length) return;
+
+    var moved = order[index];
+    var neighbour = order[target];
+    moved.group = neighbour.group;
+    order[index] = neighbour;
+    order[target] = moved;
+    sendOrder(order);
+  }
+
+  function moveProjectToGroup(pid, group) {
+    var order = currentOrder().filter(function (entry) { return entry.id !== pid; });
+    var last = -1;
+    order.forEach(function (entry, index) { if (entry.group === group) last = index; });
+    order.splice(last + 1, 0, { id: pid, group: group });
+    sendOrder(order);
+  }
+
+  function openMove(pid) {
+    var overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+    var box = document.createElement('div');
+    box.className = 'dialog';
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-modal', 'true');
+
+    var title = document.createElement('h3');
+    title.className = 'dialog__title';
+    title.textContent = 'Move this project';
+
+    var steps = document.createElement('div');
+    steps.className = 'dialog__actions dialog__actions--start';
+    [['Move up', -1], ['Move down', 1]].forEach(function (pair) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'btn btn--secondary btn--sm';
+      button.textContent = pair[0];
+      button.addEventListener('click', function () { close(); stepProject(pid, pair[1]); });
+      steps.appendChild(button);
+    });
+
+    var label = document.createElement('label');
+    label.className = 'dialog__field';
+    var caption = document.createElement('span');
+    caption.className = 'field-label';
+    caption.textContent = 'Move to the end of';
+    var select = document.createElement('select');
+    select.className = 'form-input';
+    groupsInOrder().forEach(function (group) {
+      var option = document.createElement('option');
+      option.value = group.key;
+      option.textContent = group.title;
+      select.appendChild(option);
+    });
+    var row = projectRow(pid);
+    if (row) select.value = row.dataset.groupChild;
+    label.append(caption, select);
+
+    var actions = document.createElement('div');
+    actions.className = 'dialog__actions';
+    var cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn btn--secondary btn--sm';
+    cancel.textContent = 'Cancel';
+    var move = document.createElement('button');
+    move.type = 'button';
+    move.className = 'btn btn--default btn--sm';
+    move.textContent = 'Move';
+
+    function close() { overlay.remove(); Dialog.open = null; }
+    cancel.addEventListener('click', close);
+    move.addEventListener('click', function () {
+      var group = select.value;
+      close();
+      moveProjectToGroup(pid, group);
+    });
+    overlay.addEventListener('mousedown', function (event) {
+      if (event.target === overlay) close();
+    });
+
+    actions.append(cancel, move);
+    box.append(title, steps, label, actions);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    Dialog.open = close;
+    move.focus();
+  }
+
   /* ─── Search ────────────────────────────────────────────────────────────────
      Best effort by agreement: it looks at what the page already shows — titles,
      people, notes, intros — opens whatever hides a match and marks it. The
      exhaustive search is the markdown view, which is one document and one
      ctrl-F. */
   var SEARCH_IN = '.project-title, .resource-line, .todo-text, .intro-text, ' +
-                  '.global-todo-card__title, .tree__project, .tree__row';
+                  '.global-todo-card__title, .tree__project, .tree__row, .pcard__name';
 
   var Search = {
     marked: [],
@@ -1339,13 +2095,7 @@
       if (!row) return;
       if (row.dataset.groupChild) setGroup(row.dataset.groupChild, true, false);
       if (row.dataset.projChild) setProject(row.dataset.projChild, true, false);
-      if (row.classList.contains('detail-row')) {
-        var panel = row.dataset.projId;
-        var main = document.querySelector('.project-main-row[data-proj-id="' +
-          CSS.escape(panel) + '"]');
-        if (main) setGroup(main.dataset.groupChild, true, false);
-        setDetail(panel, true, false);
-      }
+      if (row.classList.contains('detail-row')) setDetail(row.dataset.projId, true, false);
     },
 
     run: function (query) {
@@ -1375,43 +2125,32 @@
       setGlobalTodos(isHidden(byId('global-todos-content')));
     },
     'toggle-group': function (el, data) {
-      setGroup(data.group, groupRows(data.group).some(isHidden));
+      setGroup(data.group, groupCollapsed(data.group));
     },
     'toggle-project': function (el, data) {
-      var rows = projectRows(data.project);
-      if (!rows.length) return;
-      setProject(data.project, rows.every(isHidden));
+      if (!projectRows(data.project).length) return;
+      setProject(data.project, projectCollapsed(data.project));
     },
     'toggle-detail': function (el, data) {
-      setDetail(data.project, isHidden(detailRow(data.project)));
+      setDetail(data.project, !detailOpen(data.project));
     },
+    /* From the list: the same panel, under the card that was tapped. */
+    'open-project': function (el, data) {
+      var open = detailOpen(data.project);
+      setDetail(data.project, !open);
+      syncPanels();
+      if (!open) {
+        var row = detailRow(data.project);
+        if (row && row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });
+      }
+    },
+    'surface': function (el, data) { Surface.set(data.surfaceTab); },
+    'project-move': function (el, data) { openMove(data.project); },
     'toggle-history': function (el, data) {
       setHistory(data.project, isHidden(byId('history-box-' + data.project)));
     },
 
-    'expand-groups': function () {
-      collectGroups().forEach(function (group) { setGroup(group, true, false); });
-      UIState.save();
-    },
-    'collapse-groups': function () {
-      collectGroups().forEach(function (group) { setGroup(group, false, false); });
-      UIState.save();
-    },
-    'expand-projects': function () {
-      collectGroups().forEach(function (group) { setGroup(group, true, false); });
-      collectProjects().forEach(function (pid) { setProject(pid, true, false); });
-      UIState.save();
-    },
-    'collapse-projects': function () {
-      collectProjects().forEach(function (pid) { setProject(pid, false, false); });
-      UIState.save();
-    },
-    'toggle-hide-past': function (el, data) {
-      UIState.save();
-      var target = data.target === '1' ? '1' : '0';
-      try { localStorage.setItem(HIDE_PAST_KEY, target); } catch (err) { /* noop */ }
-      window.location.href = '/?hide_past=' + target;
-    },
+    'depth': function (el, data) { Depth.set(data.depth); },
 
     'todo-add': function (el, data) {
       var textInput = byId('new-todo-text-' + data.project);
@@ -1474,6 +2213,7 @@
       });
     },
     'todo-save':   function (el, data) { commitEdit(data.project, data.todo); },
+    'todo-move': function (el, data) { moveTodo(data.project, data.todo, Number(data.delta)); },
     'todo-cancel': function (el, data) {
       guard('cancel', DISCARD, function () { cancelEdit(data.project, data.todo); });
     },
@@ -1572,6 +2312,14 @@
         reloadOnSuccess(projectApi(AdvEdit.pid, 'raw-update', { raw_text: raw }));
       });
     },
+    'theme': function (el, data) { Theme.set(data.theme); },
+    'theme-gallery': function () { Theme.gallery(); },
+    'settings-open': function () { setSettings(true); },
+    'settings-close': function () { setSettings(false); },
+    'settings-backdrop': function (el, data, event) {
+      if (event && event.target === el) setSettings(false);
+    },
+    'zoom': function (el, data) { ChartWindow.go({ zoom: data.zoom }); },
     'view-tab': function (el, data) {
       all('.tabs .tab').forEach(function (tab) {
         tab.classList.toggle('tab--active', tab === el);
@@ -1609,6 +2357,26 @@
     'milestone-open': function (el, data) {
       openMilestone(data.project, data.milestone || '', '');
     },
+    /* The row dialog is opened from three places: the person in the chart, the
+       chip in the panel, and Add — which is the same dialog with nothing in it. */
+    'row-open': function (el) {
+      openTimelineRow(el.closest('.resource-line') || el);
+    },
+    'project-rename': function (el, data) { openRename(data.project, data.name || ''); },
+
+    /* A desktop row has room for the two buttons on its right, so the title
+       is free to mean `rename`. A phone row has room for a caret and a name,
+       and the thing you want from a project on a phone is its notes — so
+       there the title is the row: a tap opens the project under it. Rename is
+       a button in the panel that opens, on either surface. */
+    'project-title': function (el, data) {
+      if (narrow()) {
+        setDetail(data.project, !detailOpen(data.project));
+        syncPanels();
+        return;
+      }
+      openRename(data.project, data.name || '');
+    },
 
     'advedit-row-add': function (el, data) { addSchemaRow(data.section); },
     'advedit-row-remove': function (el) {
@@ -1620,6 +2388,17 @@
   var ChangeActions = {
     'preference': function (el, data) { Prefs.set(data.pref, el.checked); },
     'search': function (el) { Search.run(el.value); },
+    'window': function (el) {
+      var picker = byId('window-date');
+      if (el.value !== 'date') return ChartWindow.go({ from: el.value });
+      // "From a date…" is not a window until a date is picked.
+      if (picker) {
+        picker.hidden = false;
+        picker.focus();
+        if (picker.showPicker) { try { picker.showPicker(); } catch (err) { /* typed */ } }
+      }
+    },
+    'window-date': function (el) { if (el.value) ChartWindow.go({ from: el.value }); },
     'attachment-upload': function (el, data) {
       var files = Array.prototype.slice.call(el.files || []);
       if (!files.length) return;
@@ -1677,28 +2456,80 @@
   /* ─── Double click opens an editor ─────────────────────────────────────────
      Every editable value renders read-only and becomes an editor on double
      click: one gesture everywhere beats a pencil button per field. */
-  document.addEventListener('dblclick', function (event) {
-    var note = event.target.closest('.todo-text');
+  /* One gesture, two devices. A mouse double-clicks a value to edit it; a
+     finger has no double click worth the name, and the platform gesture for
+     "open this" is a single tap. Same handler, different event. */
+  function openEditorAt(target) {
+    if (!target || !target.closest) return false;
+
+    var note = target.closest('.todo-text');
     if (note && !note.classList.contains('done')) {
       var row = note.closest('.todo-item-row');
-      if (row && row.dataset.project) startEdit(row.dataset.project, row.dataset.todo);
-      return;
+      if (row && row.dataset.project) {
+        startEdit(row.dataset.project, row.dataset.todo);
+        return true;
+      }
     }
-    var intro = event.target.closest('.intro-text');
-    var box = intro && intro.closest('.intro-box');
-    if (box && box.dataset.project) return startIntroEdit(box.dataset.project);
 
-    var view = event.target.closest('.editable-view');
-    if (view) openField(view.closest('.editable-field'));
+    var intro = target.closest('.intro-text');
+    var box = intro && intro.closest('.intro-box');
+    if (box && box.dataset.project) {
+      startIntroEdit(box.dataset.project);
+      return true;
+    }
+
+    var view = target.closest('.editable-view');
+    if (view) {
+      openField(view.closest('.editable-field'));
+      return true;
+    }
+    return false;
+  }
+
+  function coarsePointer() {
+    return !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+  }
+
+  document.addEventListener('dblclick', function (event) {
+    openEditorAt(event.target);
   });
 
-  /* The same gesture from the keyboard: the view is focusable, Enter opens it. */
+  document.addEventListener('click', function (event) {
+    if (!coarsePointer()) return;
+
+    /* A bar cannot be dragged with a finger, so a tap on one opens the row it
+       belongs to — the same dialog the person's name opens, reached from the
+       other end of the same row. */
+    var bar = event.target.closest('.sub-bar[data-task]');
+    if (bar) {
+      var line = document.querySelector('.resource-line[data-task="' +
+        CSS.escape(bar.dataset.task) + '"][data-project="' +
+        CSS.escape(bar.dataset.project) + '"]');
+      if (line) return openTimelineRow(line);
+    }
+
+    if (event.target.closest('[data-action], input, select, textarea, a, button')) return;
+    openEditorAt(event.target);
+  });
+
+  /* The same gesture from the keyboard: these are focusable, Enter opens them. */
   document.addEventListener('keydown', function (event) {
-    if (event.key !== 'Enter') return;
-    var view = event.target.closest && event.target.closest('.editable-view');
-    if (!view) return;
-    event.preventDefault();
-    openField(view.closest('.editable-field'));
+    if (event.key !== 'Enter' || !event.target.closest) return;
+    var view = event.target.closest('.editable-view');
+    if (view) {
+      event.preventDefault();
+      return openField(view.closest('.editable-field'));
+    }
+    var line = event.target.closest('.resource-line[data-action="row-open"]');
+    if (line) {
+      event.preventDefault();
+      return openTimelineRow(line);
+    }
+    var title = event.target.closest('.project-title[data-action="project-title"]');
+    if (title) {
+      event.preventDefault();
+      ClickActions['project-title'](title, title.dataset);
+    }
   });
 
   /* ─── Single event-delegation router ────────────────────────────────────── */
@@ -1711,7 +2542,14 @@
       Toast.error('Unregistered action: ' + target.dataset.action);
       return;
     }
-    event.preventDefault();
+    /* An action can sit on an ancestor of what was clicked — an overlay's
+       backdrop is one — and cancelling the default then cancels the click
+       itself: a checkbox stops toggling, a label stops reaching its box. The
+       action belongs to the element that declares it; the default belongs to
+       the control that was pressed. */
+    if (!event.target.closest('input, select, textarea, label')) {
+      event.preventDefault();
+    }
     handler(target, target.dataset, event);
   });
 
@@ -1739,11 +2577,15 @@
     if (event.key !== 'Escape') return;
     if (Dialog.open) return Dialog.open(false);
     if (!isHidden(byId('advanced-edit-overlay'))) return closeAdvancedEdit();
-    var field = byId('search-field');
-    if (field && field.value) {
-      field.value = '';
-      Search.run('');
-    }
+    if (!isHidden(byId('settings-overlay'))) return setSettings(false);
+    var adopted = Object.keys(panelHome)[0];
+    if (adopted) return setDetail(adopted, false);
+
+    var cleared = false;
+    all('[data-change="search"]').forEach(function (field) {
+      if (field.value) { field.value = ''; cleared = true; }
+    });
+    if (cleared) Search.run('');
   });
 
   /* ─── Sticky column resize ──────────────────────────────────────────────────
@@ -1763,14 +2605,6 @@
 
     save: function (width) {
       try { localStorage.setItem(LABEL_W_KEY, String(width)); } catch (err) { /* noop */ }
-    },
-
-    /* The drag handle spans the chart, whose height only the browser knows. */
-    syncHeight: function () {
-      var table = byId('gantt-table');
-      if (table) {
-        document.documentElement.style.setProperty('--chart-h', table.offsetHeight + 'px');
-      }
     },
 
     restore: function () {
@@ -1813,13 +2647,43 @@
       document.addEventListener('mouseup', endDrag);
       document.addEventListener('mouseleave', endDrag);
 
-      this.syncHeight();
+    }
+  };
+
+  /* ─── The edges of the chart ────────────────────────────────────────────────
+     Two things the chart has to say about itself: how tall it is — only the
+     browser knows, and the handle and the shades are drawn over it — and
+     whether there is more of it to either side. */
+  var ChartEdges = {
+    sync: function () {
+      var table = byId('gantt-table');
+      if (table) {
+        document.documentElement.style.setProperty('--chart-h', table.offsetHeight + 'px');
+      }
+      this.state();
+    },
+
+    state: function () {
+      var scroll = byId('gantt-scroll');
+      if (!scroll) return;
+      var hidden = scroll.scrollWidth - scroll.clientWidth;
+      var edges = [];
+      if (scroll.scrollLeft > 1) edges.push('left');
+      if (scroll.scrollLeft < hidden - 1) edges.push('right');
+      scroll.dataset.scrollX = edges.join(' ');
+    },
+
+    init: function () {
+      var self = this;
+      var scroll = byId('gantt-scroll');
+      if (!scroll) return;
+      scroll.addEventListener('scroll', function () { self.state(); }, { passive: true });
+      window.addEventListener('resize', function () { self.sync(); });
       var table = byId('gantt-table');
       if (table && window.ResizeObserver) {
-        new ResizeObserver(function () { self.syncHeight(); }).observe(table);
-      } else {
-        window.addEventListener('resize', function () { self.syncHeight(); });
+        new ResizeObserver(function () { self.sync(); }).observe(table);
       }
+      self.sync();
     }
   };
 
@@ -1978,7 +2842,7 @@
             body: from + ' → ' + to + ', written into the card.',
             confirmLabel: 'Move'
           }, function () {
-            projectApi(bar.dataset.project, 'timeline/move', {
+            projectApi(bar.dataset.project, 'timeline/save', {
               task_id: bar.dataset.task || '', start: from, end: to
             }).then(function () { location.reload(); })
               .catch(function () { self.reset(bar, first, span, column); });
@@ -2010,8 +2874,7 @@
       }
 
       function isCollapsed(group) {
-        var rows = groupRows(group);
-        return !rows.length || rows.some(isHidden);
+        return groupCollapsed(group) || !groupRows(group).length;
       }
 
       function targetRow(el) {
@@ -2106,16 +2969,48 @@
     }
   };
 
-  /* The server opens on today; only the opposite choice needs carrying over,
-     and only when the URL is silent — a link that spells `hide_past` out wins. */
-  function restoreHidePast() {
-    if (location.search.indexOf('hide_past=') !== -1) return false;
-    var stored = null;
-    try { stored = localStorage.getItem(HIDE_PAST_KEY); } catch (err) { return false; }
-    if (stored !== '0') return false;
-    location.replace('/?hide_past=0');
-    return true;
-  }
+  /* The server opens on today; any other window needs carrying over, and only
+     when the URL is silent — a link that spells `from` out wins. */
+  var ChartWindow = {
+    /* The window and the zoom are the two halves of what the chart shows, and
+       they travel together: both in the URL, both remembered per browser. */
+    read: function (key, fallback) {
+      var url = new URLSearchParams(location.search).get(key);
+      if (url) return url;
+      try { return localStorage.getItem(key === 'from' ? WINDOW_KEY : ZOOM_KEY) || fallback; }
+      catch (err) { return fallback; }
+    },
+
+    go: function (changes) {
+      UIState.save();
+      var next = {
+        from: 'from' in changes ? changes.from : this.read('from', 'today'),
+        zoom: 'zoom' in changes ? changes.zoom : this.read('zoom', 'day')
+      };
+      try {
+        localStorage.setItem(WINDOW_KEY, next.from);
+        localStorage.setItem(ZOOM_KEY, next.zoom);
+      } catch (err) { /* noop */ }
+      location.href = '/?from=' + encodeURIComponent(next.from) +
+        '&zoom=' + encodeURIComponent(next.zoom);
+    },
+
+    restore: function () {
+      // The chart is the only page with a scale: on any other one this redirect
+      // would throw the page away as it opened.
+      if (location.pathname !== '/') return false;
+      if (location.search.indexOf('from=') !== -1) return false;
+      var window_ = null, zoom = null;
+      try {
+        window_ = localStorage.getItem(WINDOW_KEY);
+        zoom = localStorage.getItem(ZOOM_KEY);
+      } catch (err) { return false; }
+      if ((!window_ || window_ === 'today') && (!zoom || zoom === 'day')) return false;
+      location.replace('/?from=' + encodeURIComponent(window_ || 'today') +
+        '&zoom=' + encodeURIComponent(zoom || 'day'));
+      return true;
+    }
+  };
 
   function loadStyleMaps() {
     var host = document.querySelector('[data-status-styles]');
@@ -2126,14 +3021,34 @@
     } catch (err) { /* the pills keep the colour the server gave them */ }
   }
 
+  /* The service worker is written and waiting in static/, deliberately not
+     registered: installability is its own milestone, and a cached shell while
+     the interface is still moving serves yesterday's CSS to today's phone.
+     One line brings it back when that milestone opens. */
+
   document.addEventListener('DOMContentLoaded', function () {
-    if (restoreHidePast()) return;
+    if (ChartWindow.restore()) return;
+    // The collapse state changes the height of the page, so the browser's own
+    // guess at where you were is worse than useless: we restore both ourselves.
+    if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
     loadStyleMaps();
+    Theme.show();
+    Surface.restore();
     Prefs.load();
     UIState.restore();
+    // A window that stops being narrow takes the project list with it, and an
+    // adopted panel would go with the list: it goes home first.
+    window.addEventListener('resize', syncPanels);
+    // The tooltip is also what a screen reader announces, and on a phone the
+    // title no longer renames: it must not say that it does.
+    titleHints();
+    window.addEventListener('resize', titleHints);
+    Scroll.restore();
+    Scroll.watch();
     // Column resizing and row reordering both need a pointing device. On touch
     // the CSS hides their handles; skipping the wiring here also keeps a width
     // saved on a desktop from squeezing the chart on a phone.
+    ChartEdges.init();
     if (window.matchMedia && window.matchMedia('(pointer: fine)').matches) {
       ColumnResize.init();
       ColumnResize.restore();

@@ -18,13 +18,14 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from dahub import gantt, markup, schema, settings as settings_module, view
 from dahub.api import ApiError, delete_attachment, dispatch, upload_attachment
 from dahub.domain import (
     Timeline, chart_spans, display_group, format_date_long, group_by_display,
-    project_milestones, project_span, project_tasks, resolve_person, tier_key,
+    project_milestones, project_span, project_tasks, resolve_person, resolve_range,
+    tier_key,
 )
 from dahub.cardmd import build_card, parse_card
 from dahub.migrate import convert, import_plan, migrate_vault, parse_plan
@@ -482,10 +483,77 @@ class DomainTest(unittest.TestCase):
         self.assertIsNotNone(timeline.today_index)
         self.assertTrue(all(day.weekday() < 5 for day in timeline.days))
 
-    def test_hide_past_drops_earlier_days(self):
-        timeline = Timeline(self.spans, settings=self.settings, hide_past=True, today=TODAY)
+    def test_the_window_cuts_the_scale_on_both_sides(self):
+        start, end, key = resolve_range('today', TODAY)
+        timeline = Timeline(self.spans, settings=self.settings, today=TODAY,
+                            start_from=start, end_at=end)
+        self.assertEqual(key, 'today')
         self.assertEqual(timeline.days[0].date(), TODAY)
         self.assertEqual(timeline.today_index, 0)
+
+        start, end, _ = resolve_range('30d', TODAY)
+        timeline = Timeline(self.spans, settings=self.settings, today=TODAY,
+                            start_from=start, end_at=end)
+        self.assertEqual(timeline.days[0].date(), date(2026, 8, 10))   # the Monday after
+
+        start, end, _ = resolve_range('year', TODAY)
+        timeline = Timeline(self.spans, settings=self.settings, today=TODAY,
+                            start_from=start, end_at=end)
+        self.assertGreaterEqual(timeline.days[0].date(), date(2026, 1, 1))
+        self.assertLessEqual(timeline.days[-1].date(), date(2026, 12, 31))
+
+        start, end, key = resolve_range('2026-03-02', TODAY)
+        self.assertEqual(key, '2026-03-02')
+        timeline = Timeline(self.spans, settings=self.settings, today=TODAY,
+                            start_from=start, end_at=end)
+        self.assertEqual(timeline.days[0].date(), date(2026, 3, 2))
+
+    def test_a_zoomed_out_scale_runs_past_the_last_bar(self):
+        """Zooming out is asking to see further; the window still decides the end."""
+        from dahub.settings import ZOOM_HORIZON
+        plain = Timeline(self.spans, settings=self.settings, today=TODAY)
+        far = Timeline(self.spans, settings=self.settings, today=TODAY,
+                       horizon=ZOOM_HORIZON['month'])
+        self.assertGreater(len(far.days), len(plain.days))
+        self.assertGreaterEqual(far.days[-1].date(), TODAY + timedelta(days=700))
+
+        # The row above the months groups the same days by year.
+        self.assertEqual([year for year, _count in far.years],
+                         sorted({day.year for day in far.days}))
+        self.assertEqual(sum(count for _year, count in far.years), len(far.days))
+
+        # A window that names its own end is not stretched past it.
+        start, end, _ = resolve_range('year', TODAY)
+        bounded = Timeline(self.spans, settings=self.settings, today=TODAY,
+                           start_from=start, end_at=end,
+                           horizon=ZOOM_HORIZON['month'])
+        self.assertLessEqual(bounded.days[-1].date(), date(2026, 12, 31))
+
+    def test_the_zoom_only_changes_how_wide_a_day_is_drawn(self):
+        from dahub.domain import resolve_zoom
+        self.assertEqual(resolve_zoom('day'), (17, 'day'))
+        self.assertEqual(resolve_zoom('week')[1], 'week')
+        self.assertLess(resolve_zoom('month')[0], resolve_zoom('week')[0])
+        self.assertEqual(resolve_zoom('whatever'), (17, 'day'))
+
+        wide = Timeline(self.spans, settings=self.settings, today=TODAY)
+        narrow = Timeline(self.spans, settings=self.settings, today=TODAY,
+                          col_width=resolve_zoom('month')[0])
+        # the same days, drawn in less room
+        self.assertEqual(len(wide.days), len(narrow.days))
+        self.assertLess(narrow.width, wide.width)
+
+    def test_an_unknown_window_falls_back_to_today(self):
+        self.assertEqual(resolve_range('whenever', TODAY), (TODAY, None, 'today'))
+        self.assertEqual(resolve_range('2026-13-40', TODAY), (TODAY, None, 'today'))
+        self.assertEqual(resolve_range('all', TODAY), (None, None, 'all'))
+
+    def test_a_window_with_no_work_in_it_still_draws_a_month(self):
+        start, end, _ = resolve_range('2030-01-07', TODAY)
+        timeline = Timeline(self.spans, settings=self.settings, today=TODAY,
+                            start_from=start, end_at=end)
+        self.assertEqual(timeline.days[0].date(), date(2030, 1, 7))
+        self.assertEqual(len(timeline.days), 22)
 
     def test_geometry_is_none_outside_the_scale(self):
         timeline = Timeline([], settings=self.settings, today=TODAY)
@@ -622,22 +690,37 @@ class SchemaAndApiTest(VaultTestCase):
                                    in self.repo.load(self.PROJECT)[0]['milestones']])
 
     def test_a_bar_is_moved_and_resized_by_dates(self):
-        dispatch(self.repo, self.PROJECT, 'timeline/move',
+        dispatch(self.repo, self.PROJECT, 'timeline/save',
                  {'task_id': 'task-1', 'start': '2026-08-31', 'end': '2026-10-16'}, now=NOW)
         task = self.repo.load(self.PROJECT)[0]['timeline']['tasks'][0]
         self.assertEqual((task['start'], task['end']), ('2026-08-31', '2026-10-16'))
 
-        dispatch(self.repo, self.PROJECT, 'timeline/move',
+        dispatch(self.repo, self.PROJECT, 'timeline/save',
                  {'start': '2026-08-31', 'end': '2026-11-27'}, now=NOW)
         timeline = self.repo.load(self.PROJECT)[0]['timeline']
         self.assertEqual((timeline['start'], timeline['end']), ('2026-08-31', '2026-11-27'))
+
+    def test_a_timeline_row_is_added_from_the_panel(self):
+        before = len(self.repo.load(self.PROJECT)[0]['timeline']['tasks'])
+        result = dispatch(self.repo, self.PROJECT, 'timeline/save',
+                          {'task_id': 'new', 'who': 'Grace Hopper', 'note': 'spike',
+                           'start': '2026-10-05', 'end': '2026-10-16'}, now=NOW)
+        tasks = self.repo.load(self.PROJECT)[0]['timeline']['tasks']
+        self.assertEqual(len(tasks), before + 1)
+        self.assertEqual(tasks[-1]['who'], 'Grace Hopper')
+        self.assertEqual(tasks[-1]['id'], result['task']['id'])
+
+        with self.assertRaises(ApiError):     # a row belongs to somebody
+            dispatch(self.repo, self.PROJECT, 'timeline/save',
+                     {'task_id': 'new', 'who': '  ', 'start': '2026-10-05',
+                      'end': '2026-10-16'}, now=NOW)
 
     def test_a_bar_cannot_be_moved_to_a_date_the_card_cannot_hold(self):
         for payload in ({'start': 'yesterday', 'end': '2026-10-16'},
                         {'start': '2026-10-16', 'end': '2026-08-31'},
                         {'task_id': 'nope', 'start': '2026-10-01', 'end': '2026-10-16'}):
             with self.assertRaises(ApiError):
-                dispatch(self.repo, self.PROJECT, 'timeline/move', payload, now=NOW)
+                dispatch(self.repo, self.PROJECT, 'timeline/save', payload, now=NOW)
 
     def test_a_milestone_without_a_date_is_refused(self):
         with self.assertRaises(ApiError):
@@ -812,6 +895,7 @@ class ViewTest(unittest.TestCase):
         # inside it is an identifier, not a request.
         self.assertNotIn('href="http', head)
         self.assertNotIn('src="http', head)
+        self.assertIn('<script src="/static/theme.js">', head)   # before the first paint
 
     def test_attachments_render_with_size_and_a_remove_button(self):
         card = next(p for p in self.projects if p['id'] == 'project-1-navigation-menu')
@@ -926,9 +1010,9 @@ class GatedServerTest(VaultTestCase):
         self.assertEqual(self.repo.list_attachments('project-8-banner-defaults'), [])
 
     def test_the_token_in_the_url_hands_back_a_cookie_and_a_clean_redirect(self):
-        status, _, headers = self.fetch(f'/?k={self.TOKEN}&hide_past=1', redirect=False)
+        status, _, headers = self.fetch(f'/?k={self.TOKEN}&from=all', redirect=False)
         self.assertEqual(status, 302)
-        self.assertEqual(headers['Location'], '/?hide_past=1')
+        self.assertEqual(headers['Location'], '/?from=all')
         self.assertIn(f'{_TOKEN_COOKIE}={self.TOKEN}', headers['Set-Cookie'])
         self.assertIn('HttpOnly', headers['Set-Cookie'])
         self.assertIn('SameSite=Lax', headers['Set-Cookie'])
@@ -1001,9 +1085,15 @@ class ServerTest(VaultTestCase):
         self.assertIn("default-src 'self'", headers['Content-Security-Policy'])
 
     def test_the_chart_opens_on_today_unless_the_url_says_otherwise(self):
-        self.assertIn('Show all dates', self.get('/')[1])
-        self.assertIn('Show all dates', self.get('/?hide_past=1')[1])
-        self.assertIn('Show from today', self.get('/?hide_past=0')[1])
+        default = self.get('/')[1]
+        self.assertIn('<option value="today" selected>', default)
+        self.assertIn('<option value="all" selected>', self.get('/?from=all')[1])
+        self.assertIn('<option value="year" selected>', self.get('/?from=year')[1])
+        # a date lands in the picker beside the select
+        chosen = self.get('/?from=2026-03-02')[1]
+        self.assertIn('<option value="date" selected>', chosen)
+        self.assertIn('id="window-date" aria-label="Show from this date" value="2026-03-02"',
+                      chosen)
 
     def test_health_and_schema_endpoints(self):
         self.assertEqual(json.loads(self.get('/api/health')[1])['status'], 'ok')

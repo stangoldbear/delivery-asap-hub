@@ -67,6 +67,17 @@ COL_W = 17           # day column width in px
 LABEL_W = 340        # sticky left column, initial width
 LABEL_W_MIN = 160    # drag limits for the sticky column
 LABEL_W_MAX = 900
+# How wide one working day is drawn, per zoom level. A column is always a day —
+# what changes is how many of them fit, and therefore what the header can say.
+ZOOM_LEVELS = {'day': COL_W, 'week': 6, 'month': 2}
+# How far ahead the scale runs when the window has not said where to stop.
+# Zooming out is asking to see further, and at 2px a day a scale that ends
+# with the last bar leaves two thirds of the screen empty: a month view of one
+# quarter is not a month view. Calendar days, measured from today; a window
+# with an end date of its own always wins.
+ZOOM_HORIZON = {'day': 0, 'week': 190, 'month': 760}
+DEFAULT_ZOOM = 'day'
+
 ROW_H = 34           # project row (one line: identity, signals, actions)
 SUB_ROW_H = 20       # resource row
 
@@ -94,6 +105,7 @@ class Settings:
     chart_min_end: date
     months: tuple
     month_abbr: tuple
+    weekday_initials: tuple
     tiers: dict            # key -> {'title': str, 'rgb': (r, g, b)}
     default_tier: str
     platforms: tuple
@@ -209,6 +221,11 @@ def _parse(raw, source):
     month_abbr = tuple(locale.get('month_abbr', ()))
     if len(months) != 12 or len(month_abbr) != 12:
         raise SettingsError(f'{source}: [locale] months and month_abbr need 12 entries each.')
+    weekday_initials = tuple(locale.get('weekday_initials',
+                                        ('M', 'T', 'W', 'T', 'F', 'S', 'S')))
+    if len(weekday_initials) != 7:
+        raise SettingsError(f'{source}: [locale] weekday_initials needs 7 entries, '
+                            f'Monday first.')
 
     min_end = raw.get('timeline', {}).get('min_end', date(date.today().year, 12, 31))
     if not isinstance(min_end, date):
@@ -234,6 +251,7 @@ def _parse(raw, source):
         chart_min_end=min_end,
         months=months,
         month_abbr=month_abbr,
+        weekday_initials=weekday_initials,
         tiers=tiers,
         default_tier=default_tier,
         platforms=tuple(defaults.get('platforms', ())),

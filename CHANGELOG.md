@@ -4,6 +4,158 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/).
 
+## 1.1.0 — 2026-09-11
+
+- Clicking a person in the label column opens the timeline row they own — who
+  it belongs to, when it runs, its note — with a delete that asks first.
+  Clicking a project title renames it. Both are the same small form dialog the
+  milestones already used.
+- The theme can be forced to light or dark from the footer, whatever the system
+  says. The choice is applied before the first paint, so a forced dark theme no
+  longer flashes white on every page.
+- `timeline/move` becomes `timeline/save`, which also writes `who` and the note
+  when the caller sends them, and `timeline/delete` removes a row.
+- The four expand/collapse buttons become three levels — Groups, Projects,
+  Stakeholders — which always mean the same thing whatever state the chart is
+  in. The collapse state is held on the rows themselves, so folding a group no
+  longer forgets which projects inside it were folded.
+- The chart is drawn through a window you choose: from today, the last 30 days,
+  this year, all dates, or from a date. It travels as `?from=…` and replaces
+  `?hide_past=`.
+- A reload keeps where you were: the window, everything collapsed or opened,
+  and both scroll positions — the document's and the chart's own.
+- Thirteen more themes behind **More…** in the footer, borrowed from well-known
+  editors. Each one is a token block in `themes.css` and nothing else changes;
+  the picker reads the list back out of that stylesheet, so there is no second
+  list to keep in step.
+- A thicker line at every month boundary and a thinner one at every week, down
+  the whole chart and behind the bars.
+- The Structure tab of the Hierarchy view shows every value a card holds, under
+  the names the card uses — including keys this codebase knows nothing about,
+  and the `## Notes` body — with each project foldable on its own.
+- The calendar stays at the top while the rows scroll under it: the chart is a
+  viewport of its own, pinned to the top of the window.
+- A fourth level, **All details**, opens the notes and actions of every project
+  along with everything else.
+- An optional row of weekday initials under the day numbers, switched from the
+  footer.
+- The notes panel now reads as part of the project above it: the same tier rail
+  running unbroken down the block, no gap under the row, an indent to where
+  that project's people are listed, and the row itself held open-looking for as
+  long as its panel is.
+- Ten light themes beside the thirteen dark ones, in their own half of the
+  picker. Both sets are generated from a palette table by
+  `dev-tools/make-themes.py`.
+- A zoom: Day, Week or Month. A column is always one working day — the zoom
+  decides how wide it is drawn and the header says as much as it still can.
+- The footer is a single line pinned to the bottom of the window, so the
+  settings on it are reachable whatever the chart is doing.
+- **A phone gets its own interface.** Below 900px the chart stops being the
+  surface: a bottom tab bar carries Projects, Chart, Notes and More over the
+  same cards, the default being a list of project cards with the span, the
+  milestones and what is asking for attention. Tapping one opens that
+  project's notes and actions under the card — the same panel the chart opens
+  under its row, moved rather than copied, and never an overlay: **All
+  details** would otherwise leave a screenful of windows to dismiss. A single
+  tap opens what a double click opens on a desktop.
+- On the chart tab a person's lane costs 35px instead of 49: the target is the
+  row, which is as wide as the screen, rather than a 44pt button inside it.
+  Nothing in the panel reaches past the right edge any more — the platform
+  chips, the Add beside a heading, the ✕ that removes a link and a pasted URL
+  all wrap instead — including a timeline chip, whose date range used to run
+  off the right of the screen because a chip is a one-line pill on a desktop.
+  A note gives its text the whole line beside the checkbox and keeps its
+  delete in the corner, which is a third of the height back. Scrolling the
+  timeline sideways no longer drags the panel along for the first 15px: it
+  sticks where it stands, because it belongs to the project and not to the
+  axis — and neither does it bounce: the rubber band slid the sticky label
+  column and the panel out of step with the rows for as long as a finger was
+  down. The project's tier rail stays beside the panel at any scroll offset,
+  on the same pixel as the rails of the rows above it.
+- On a phone the project title in the chart opens that project's notes and
+  actions, under its row, the way tapping its card does in the list — opening
+  one project no longer means **All details** and a page of every project's
+  notes. The title renames on a desktop, where the row has room for the two
+  buttons that do these things; on a phone the name is renamed from inside the
+  panel, which now carries a **Rename** button in its header beside Move — on
+  every screen, so the action is somewhere you can point at rather than a
+  gesture you have to know.
+- **Three things a phone could no longer do**, found by going through
+  everything the small-screen rules hide: **Advanced edit** had no door at all
+  — its only button lives on the project row, which has no room for it there —
+  so it joins Rename and Move in the panel header. The **Hierarchy** page was
+  a dead end: the header that carries the link back was hidden on every page,
+  and the footer with the theme, the preferences and the snapshot download is
+  a surface the tab bar reveals, and that page has no tab bar. The shell now
+  says which of the two pages it is, and the phone's rules apply only to the
+  one with the tab bar. And **notes can be reordered again**: dragging is the
+  desktop's way and a finger cannot drag, so the note being edited carries Up
+  and Down — which is also the first time the order could be changed from a
+  keyboard.
+- **The year, above the months**, on the zooms where a month cell has no room
+  to print it — which is exactly where a chart crosses a new year without
+  saying so.
+- **A zoomed-out chart runs past the last bar.** At 2px a day the scale ended
+  with the last project and left two thirds of the screen empty: a month view
+  of one quarter is not a month view. Week now looks six months ahead and
+  Month two years, from today, unless the window has named an end of its own —
+  which still wins.
+- **Settings**, from the footer, on every screen. The theme and the
+  confirmations used to sit in the footer itself, which worked while there
+  were three of them; they are now an overlay in three groups — Theme, The
+  chart, Confirmations — and every option carries the sentence that says what
+  it does.
+- Two of them are new. **Tier bands** hides the group headings, and with them
+  the depth level that shows nothing else — picking it while the chart is
+  folded to Groups unfolds it to Projects rather than leaving an empty page.
+  **Tier colours** hides the coloured rail down the left of every row, the
+  marker on the band and the tint on a card's sparkline. Neither changes a
+  card: the markup still says which tier a project is in.
+- A date field with no value paints nothing at all on iOS — no format, no
+  hint, an empty white box — so the due date of a note now carries a **Due**
+  label beside it, in the add form and in the editor. It is the only thing
+  that says what the box is for.
+- The status pill and the deadline beside it sit on the same line again: the
+  status was wrapped in an inline-block, which adds the leading of a line box
+  around it, so centring the wrapper left the pill 1.3px low.
+- The chart ends where its last row does: the grid lines and the today band are
+  painted down the whole height of the scroller, and a notes panel is not a row
+  of the chart, so the panel's cell is opaque and the green stripe no longer
+  runs under a form.
+- **Two soft edges say the chart continues that way**: the shadow the frozen
+  label column casts once something is hidden behind it, and one on the right
+  for as long as there is more timeline — which is the half a person needs
+  before they try to scroll, and the reason it is not left to a scrollbar that
+  a phone only draws while it moves.
+- The chart runs to the edge of its card on a phone. The card's padding beside
+  a scroll area was width the timeline could not use and a white band the rows
+  were cut against; the toolbar keeps its inset, the way a table in a card
+  does.
+- The panel measures itself against the chart rather than against the window,
+  which is how its right border stopped being clipped on a desktop too:
+  `100vw` counts a scrollbar the layout never had, so a gutter computed from
+  it is wrong by exactly that much on one platform or the other.
+- **Moving a project no longer needs a drag**: Move up, Move down and Move to a
+  band, from the panel header, through the same endpoint — which is also the
+  first time the chart could be reordered from a keyboard.
+- **It installs.** A manifest, a service worker that caches the shell and never
+  the data, and icons written by `dev-tools/make-icons.py` with no dependency
+  but `zlib`. The 401 page carries a token field, because a standalone window
+  has no address bar to paste a link into.
+- A public page under `docs/`, ready for GitHub Pages.
+
+### Fixed
+
+- A checkbox inside an overlay could not be ticked. The click router cancels
+  the default of any click that reaches an element carrying an action, and an
+  overlay carries one — its backdrop — so every click inside it was cancelled
+  before the box could toggle. The default belongs to the control that was
+  pressed, not to the ancestor that declares the action. This is also why
+  **Content impact** in the Advanced form could never be changed.
+- The Hierarchy view was unreachable while "show all dates" was the remembered
+  choice: the redirect that restores it fired on every page instead of the one
+  page with a scale, so the view was thrown away as it opened.
+
 ## 1.0.0 — 2026-09-11
 
 First version.

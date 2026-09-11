@@ -26,8 +26,9 @@ from .domain import (
 )
 from .markup import attrs, esc, icon
 
-CARET_OPEN = '▲'
-CARET_CLOSED = '►'
+def caret(open_state=True):
+    """The one collapse glyph: an SVG chevron, turned by CSS when it closes."""
+    return f'<span class="caret{"" if open_state else " is-closed"}">{icon("caret")}</span>'
 
 
 def render(projects, timeline, *, detail_row, settings=None):
@@ -81,19 +82,36 @@ def _day_classes(day, timeline):
 
 
 def _header(timeline, config):
+    # A month gets its year back only when there is room to print it — and when
+    # there is not, the year is not dropped but promoted to a row of its own:
+    # zoomed out is exactly where a chart crosses a new year.
+    wide = timeline.col_width >= settings_module.COL_W / 2
     months = ''.join(
         f'<div class="month-cell" style="width:calc(var(--col-w) * {count})">'
-        f'{config.month_abbr[month - 1]} {year}</div>'
+        f'{config.month_abbr[month - 1]}{f" {year}" if wide else ""}</div>'
         for (year, month), count in timeline.months
+    )
+    years = '' if wide else ''.join(
+        f'<div class="year-cell" style="width:calc(var(--col-w) * {count})">{year}</div>'
+        for year, count in timeline.years
     )
     # The date travels with the cell: it is what turns a click at an x offset
     # in a lane into the day the pointer is over.
+    # The number is dropped when it cannot be read; the week boxes and the
+    # month bands keep saying where you are.
+    numbered = timeline.col_width >= 12
     days = ''.join(
         f'<div class="{" ".join(_day_classes(day, timeline))}" '
-        f'data-date="{day.strftime("%Y-%m-%d")}">{day.day}</div>'
+        f'data-date="{day.strftime("%Y-%m-%d")}">{day.day if numbered else ""}</div>'
         for day in timeline.days
     )
 
+    grid = _grid_lines(timeline)
+    initials = ''.join(
+        f'<div class="day-name day-name--{timeline.day_state(day)}">'
+        f'{esc(config.weekday_initials[day.weekday()])}</div>'
+        for day in timeline.days
+    )
     today_index = timeline.today_index
     band = ''
     if today_index is not None:
@@ -102,14 +120,22 @@ def _header(timeline, config):
                 f'style="--today-offset:{offset}px"></div>')
 
     return f'''<div class="gantt-scroll" id="gantt-scroll">
+{grid}
 {band}
 <div class="col-resize-handle" id="col-resize-handle"><div class="col-resize-handle__bar" title="Drag to resize"></div></div>
+<div class="scroll-shades" aria-hidden="true"><div class="scroll-shade scroll-shade--left"></div><div class="scroll-shade scroll-shade--right"></div></div>
 <table class="gantt-table" id="gantt-table">
   <colgroup>
     <col class="label-col">
     <col class="timeline-col">
   </colgroup>
   <thead>
+    {f'''<tr class="year-row">
+      <th class="label-head sticky-col"></th>
+      <th class="timeline-head">
+        <div class="timeline-strip">{years}</div>
+      </th>
+    </tr>''' if years else ''}
     <tr>
       <th class="label-head sticky-col">
         <div class="label-head__title">Project &amp; assigned resources</div>
@@ -124,8 +150,38 @@ def _header(timeline, config):
         <div class="timeline-strip">{days}</div>
       </th>
     </tr>
+    <tr class="weekday-row">
+      <th class="label-head sticky-col"></th>
+      <th class="timeline-head">
+        <div class="timeline-strip">{initials}</div>
+      </th>
+    </tr>
   </thead>
   <tbody>'''
+
+
+def _grid_lines(timeline):
+    """
+    Where a week and a month begin, drawn down the whole chart.
+
+    The day grid is a repeating gradient on every lane, which cannot know when
+    a month changes — months have different numbers of working days. These two
+    are positioned once, here, from the scale itself.
+    """
+    lines, previous = [], None
+    for index, day in enumerate(timeline.days):
+        if index and previous and day.month != previous.month:
+            kind = 'month'
+        elif index and day.weekday() == 0:
+            kind = 'week'
+        else:
+            previous = day
+            continue
+        left = index * timeline.col_width
+        lines.append(f'<div class="grid-line grid-line--{kind}" style="left:{left}px"></div>')
+        previous = day
+
+    return f'<div class="grid-lines" aria-hidden="true">{"".join(lines)}</div>' if lines else ''
 
 
 def _group_header(group, count, config):
@@ -133,7 +189,7 @@ def _group_header(group, count, config):
     return f'''<tr class="tier-row" data-group="{esc(group)}" style="--tier:{group_color(group, config)}">
   <td class="sticky-col tier-row__cell">
     <div class="tier-row__inner">
-      <button type="button" class="btn btn--ghost btn--sm btn--icon" id="btn-group-{esc(group)}" data-action="toggle-group" data-group="{esc(group)}" title="Collapse or expand this group" aria-label="Collapse or expand {esc(title)}">{CARET_OPEN}</button>
+      <button type="button" class="btn btn--ghost btn--sm btn--icon" id="btn-group-{esc(group)}" data-action="toggle-group" data-group="{esc(group)}" title="Collapse or expand this group" aria-label="Collapse or expand {esc(title)}">{caret()}</button>
       <span class="tier-row__marker"></span>
       <span class="tier-row__title">{esc(title)}</span>
       <span class="badge">{count}</span>
@@ -202,9 +258,9 @@ def _project_row(project, group, rows_of_project, timeline, config):
     <div class="project-line project-line--head">
       <div class="project-identity">
         <span class="drag-handle" title="Drag to reorder">{icon('grip')}</span>
-        <button type="button" class="btn btn--ghost btn--sm btn--icon" id="btn-toggle-proj-{esc(project_id)}" data-action="toggle-project" data-project="{esc(project_id)}" title="Collapse or expand the resources" aria-label="Collapse or expand the resources of {esc(name)}"{disabled}>{CARET_OPEN}</button>
+        <button type="button" class="btn btn--ghost btn--sm btn--icon" id="btn-toggle-proj-{esc(project_id)}" data-action="toggle-project" data-project="{esc(project_id)}" title="Collapse or expand the resources" aria-label="Collapse or expand the resources of {esc(name)}"{disabled}>{caret()}</button>
         <span class="prio-badge">{esc(project.get('priority', ''))}</span>
-        <strong class="project-title" title="{esc(project_id)}">{esc(name)}</strong>{warning}
+        <strong class="project-title" role="button" tabindex="0" title="{esc(project_id)} — click to rename" data-action="project-title" data-project="{esc(project_id)}" data-name="{esc(name)}">{esc(name)}</strong>{warning}
       </div>
       <span class="project-row__signals">
         <span class="status-wrapper" tabindex="0">
@@ -281,7 +337,7 @@ def _resource_row(project_id, group, rail, task, timeline, config):
 
     return f'''<tr class="resource-sub-row" data-group-child="{esc(group)}" data-proj-child="{esc(project_id)}" style="--tier:{rail}">
   <td class="sticky-col resource-cell">
-    <div class="resource-line">
+    <div class="resource-line" role="button" tabindex="0" title="Click to edit this row" data-action="row-open"{attrs(project=project_id, task=task['id'], who=task['who'], note=task['note'])} data-start="{task['start'].strftime('%Y-%m-%d')}" data-end="{task['end'].strftime('%Y-%m-%d')}">
       <span class="resource-line__branch">└─</span>
       <span class="resource-line__role" style="color:{color}">{esc(task['role'])}:</span>
       <span>{esc(task['who'])}</span>

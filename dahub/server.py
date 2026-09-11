@@ -27,6 +27,7 @@ _TOKEN_PARAM = 'k'
 _TOKEN_COOKIE = 'dah_token'
 
 mimetypes.add_type('text/markdown', '.md')
+mimetypes.add_type('application/manifest+json', '.webmanifest')
 
 # The page carries one inline <style> block with the layout custom properties;
 # everything else is same-origin, so no external request ever leaves the host.
@@ -37,6 +38,23 @@ _SECURITY_HEADERS = {
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',
 }
+
+
+_TOKEN_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Access token required</title><link rel="stylesheet" href="/static/app.css">
+</head><body><div class="container"><div class="dialog" style="margin:12vh auto">
+<h3 class="dialog__title">Access token required</h3>
+<p class="dialog__body">This hub is reachable from the network, so every request
+carries a shared secret. Open the link it was started with, or paste the token
+here — it is stored as a cookie for a week.</p>
+<form class="dialog__fields" method="get" action="/">
+  <label class="dialog__field"><span class="field-label">Token</span>
+  <input class="form-input" type="password" name="k" autocomplete="current-password"
+   autofocus></label>
+  <div class="dialog__actions"><button class="btn btn--default btn--sm" type="submit">
+  Open</button></div>
+</form></div></div></body></html>"""
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -84,9 +102,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if self.path.startswith('/api/'):
             return self._send_json(
                 {'success': False, 'error': 'Access token required.'}, 401)
-        self._respond(401, b'<!DOCTYPE html><meta charset="utf-8"><title>Access token '
-                           b'required</title><h1>401</h1><p>Open the link that carries the '
-                           b'access token.</p>', 'text/html; charset=utf-8')
+        # An installed app has no address bar to paste a new link into, so the
+        # refusal carries the field itself.
+        self._respond(401, _TOKEN_PAGE.encode('utf-8'), 'text/html; charset=utf-8')
 
     # ─── GET ─────────────────────────────────────────────────────────────────
     def do_GET(self):
@@ -97,7 +115,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == '/':
             # The chart opens on today unless the URL says otherwise: without a
             # parameter every visit landed months in the past and needed a click.
-            return self._send_html(self._render_dashboard(query.get('hide_past', '1') == '1'))
+            return self._send_html(
+                self._render_dashboard(query.get('from', ''), query.get('zoom', '')))
         if path == '/hierarchy':
             return self._send_html(self._render_hierarchy())
         if path == '/api/vault/markdown':
@@ -178,8 +197,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 query[unquote(key)] = unquote(value)
         return unquote(path), query
 
-    def _render_dashboard(self, hide_past):
-        return view.render_page(self.repository.list_all(), hide_past=hide_past)
+    def _render_dashboard(self, window, zoom):
+        return view.render_page(self.repository.list_all(), window=window, zoom=zoom)
 
     def _render_hierarchy(self):
         return view.render_hierarchy_page(self.repository.list_all(),

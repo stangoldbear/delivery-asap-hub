@@ -161,14 +161,14 @@ def _save_milestone(data, params, now):
     return {'milestone': created}
 
 
-def _move_timeline(data, params, _now):
+def _save_timeline(data, params, now):
     """
-    Move or resize one bar: a task when `task_id` is given, the project span
-    otherwise.
+    Write one bar: a row when `task_id` is given, the project span otherwise.
 
-    The browser sends the two dates it computed from the columns it moved over;
-    they are checked here, because a drag that ends outside the scale must not
-    be able to write a date the card cannot represent.
+    The same endpoint serves a drag, which sends two dates, and the row dialog,
+    which also sends who it belongs to and its note. Both dates are checked
+    here: a drag that ends outside the scale, or a date typed by hand, must not
+    be able to write something the card cannot represent.
     """
     start = str(params.get('start', '')).strip()
     end = str(params.get('end', '')).strip()
@@ -179,18 +179,56 @@ def _move_timeline(data, params, _now):
 
     timeline = ensure_dict(data, 'timeline')
     task_id = str(params.get('task_id', '') or '').strip()
+    tasks = csv_to_list(timeline.get('tasks'))
 
-    if not task_id:
+    # A drag of the summary bar sends two dates and nothing else; the row
+    # dialog sends who it belongs to, and `new` when there is no row yet.
+    if task_id in ('', 'new') and 'who' not in params:
         timeline['start'], timeline['end'] = start, end
         timeline.pop('days', None)      # one way of saying it, not two
         return {'timeline': {'start': start, 'end': end}}
 
-    for task in csv_to_list(timeline.get('tasks')):
-        if isinstance(task, dict) and task.get('id') == task_id:
-            task['start'], task['end'] = start, end
-            task.pop('days', None)
-            return {'task': task}
-    raise ApiError('Timeline row not found.', status=404)
+    if task_id in ('', 'new'):
+        who = str(params.get('who', '')).strip()
+        if not who:
+            raise ApiError('A timeline row needs someone to belong to.')
+        created = {
+            'id': f"task-{len(tasks) + 1}-{int(now.timestamp())}",
+            'who': who, 'start': start, 'end': end,
+        }
+        note = str(params.get('note', '')).strip()
+        if note:
+            created['note'] = note
+        tasks.append(created)
+        timeline['tasks'] = tasks
+        return {'task': created}
+
+    task = next((entry for entry in tasks
+                 if isinstance(entry, dict) and entry.get('id') == task_id), None)
+    if task is None:
+        raise ApiError('Timeline row not found.', status=404)
+
+    task['start'], task['end'] = start, end
+    task.pop('days', None)
+    # Only what the caller sent: a drag knows nothing about who or why.
+    if 'who' in params:
+        who = str(params.get('who', '')).strip()
+        if not who:
+            raise ApiError('A timeline row needs someone to belong to.')
+        task['who'] = who
+    if 'note' in params:
+        task['note'] = str(params.get('note', '')).strip()
+    timeline['tasks'] = tasks
+    return {'task': task}
+
+
+def _delete_timeline_task(data, params, _now):
+    task_id = str(params.get('task_id', '') or '').strip()
+    if not task_id:
+        raise ApiError('Missing `task_id` parameter.')
+    timeline = ensure_dict(data, 'timeline')
+    timeline['tasks'] = [entry for entry in csv_to_list(timeline.get('tasks'))
+                         if not (isinstance(entry, dict) and entry.get('id') == task_id)]
 
 
 def _delete_milestone(data, params, _now):
@@ -236,7 +274,8 @@ ROUTES = {
     'todo/toggle': _toggle_todo,
     'todo/delete': _delete_todo,
     'todo/reorder': _reorder_todos,
-    'timeline/move': _move_timeline,
+    'timeline/save': _save_timeline,
+    'timeline/delete': _delete_timeline_task,
     'milestone/save': _save_milestone,
     'milestone/delete': _delete_milestone,
 }

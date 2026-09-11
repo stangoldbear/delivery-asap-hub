@@ -54,6 +54,20 @@ nature — inside its own container. Two controls are hidden on touch because
 they need a pointing device: resizing the label column, and dragging rows to
 reorder them.
 
+The toolbar carries four things: a search, how deep the chart is unfolded —
+**Groups**, **Projects**, **Stakeholders**, **All details**, absolute levels
+rather than toggles, so they do the same thing whatever is folded right now —
+the zoom (**Day**, **Week**, **Month**: a column is always a working day, the
+zoom decides how wide it is drawn), and the window it is drawn through: from today, the last 30 days, this year, all dates,
+or from a date you pick. The choice travels in the URL (`?from=…`) and is
+remembered per browser, and so is everything you collapsed, opened and scrolled
+to: a save reloads the page and puts you back where you were, including the
+chart's own horizontal position.
+
+The footer sets the theme — System, Light, Dark, or one of thirteen palettes
+borrowed from well-known editors behind **More…** — and whether saving and
+discarding ask first.
+
 Bars are dragged and resized in the chart: grab one in the middle to move it,
 or either edge to change where it starts or ends. Whole working days, applied
 to the dates the card holds — so a bar whose start is hidden by "show from
@@ -73,11 +87,29 @@ appears in the aggregated action list: finished work should stop asking for
 attention. `priority` is the project's position over the whole chart, so the
 number in the card is the number on the screen.
 
+## On a phone
+
+Below 900px the chart stops being the interface. A bar at the bottom carries
+four surfaces over the same cards — **Projects**, **Chart**, **Notes**,
+**More** — and the default is a list of project cards: the number and the name,
+the status, the deadline as time remaining, a sparkline of the span with today
+and the milestones on it, the people as initials, and how many notes are
+waiting. Tapping one opens the project full screen with its notes first;
+tapping any value opens its editor. Projects move with **Move up / Move down /
+Move to**, because HTML5 drag and drop does not exist on iOS.
+
+The app installs to the home screen — manifest, icons and a service worker that
+caches the shell and never the data. Worth doing behind a stable hostname: a
+PWA is installed per origin, and a tunnel that mints a new one every night
+leaves the icon pointing at nothing.
+
 ## Two views over the vault
 
 The chart is one reading of the cards; **Hierarchy** is the other, and the
-header switches between them. *Structure* lists tier → project → the rows each
-project declares, on one screen and with no scrolling sideways. *Markdown* is
+header switches between them. *Structure* lists tier → project and then every value the
+card holds, under the names the card uses — the keys this codebase knows
+nothing about included, and the `## Notes` body — with each project foldable on
+its own. *Markdown* is
 every card concatenated in the same order, editable in one go: a block whose
 `- id:` is unknown creates a card, and a card whose block is not in the text is
 left alone — nothing is ever deleted from that screen. The same document
