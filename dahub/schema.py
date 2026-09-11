@@ -39,6 +39,20 @@ DEPENDENCY_COLUMNS = [
     _row('contact', 'Contact'),
     _row('criticality', 'Criticality', settings_module.SEVERITY_OPTIONS),
 ]
+TASK_COLUMNS = [
+    _row('id', 'ID'),
+    _row('who', 'Who'),
+    _row('start', 'Start'),
+    _row('end', 'End'),
+    _row('days', 'Days'),
+    _row('flags', 'Flags'),
+    _row('note', 'Note'),
+]
+MILESTONE_COLUMNS = [
+    _row('id', 'ID'),
+    _row('date', 'Date'),
+    _row('text', 'Text'),
+]
 RISK_COLUMNS = [
     _row('id', 'ID'),
     _row('description', 'Description'),
@@ -61,14 +75,22 @@ def sections(settings=None):
             field('status', 'Status', choices=settings_module.STATUS_OPTIONS),
             field('blocked_reason', 'Blocking reason'),
         ]},
-        {'key': 'dates', 'legend': 'Dates', 'fields': [
-            field('dates.started', 'Started'),
+        {'key': 'dates', 'legend': 'Reference dates', 'fields': [
             field('dates.soft_deadline', 'Soft deadline'),
             field('dates.mandatory_deadline', 'Mandatory deadline'),
             field('dates.target_delivery', 'Target delivery'),
             field('dates.deadline_text', 'Deadline (chart badge)'),
             field('dates.deadline_type', 'Deadline type', choices=DEADLINE_TYPES),
         ]},
+        {'key': 'timeline', 'legend': 'Timeline', 'fields': [
+            field('timeline.start', 'Start', help='YYYY-MM-DD; the project bar starts here'),
+            field('timeline.end', 'End', help='YYYY-MM-DD, or leave empty and set Days'),
+            field('timeline.days', 'Days', help='Working days, when there is no end date'),
+        ]},
+        {'key': 'timeline_tasks', 'legend': 'Timeline rows', 'kind': ROWS,
+         'path': 'timeline.tasks', 'columns': TASK_COLUMNS},
+        {'key': 'milestones', 'legend': 'Milestones', 'kind': ROWS,
+         'path': 'milestones', 'columns': MILESTONE_COLUMNS},
         {'key': 'tech_footprint', 'legend': 'Technical footprint', 'fields': [
             field('tech_footprint.platforms', 'Platforms', LIST,
                   help='Comma separated'),
@@ -117,6 +139,7 @@ def row_sections(settings=None):
 # ─── Quick edit (the inline detail panel) ────────────────────────────────────
 def quick_fields():
     return [
+        field('name', 'Project name'),
         field('status', 'Status', choices=settings_module.STATUS_OPTIONS),
         field('blocked_reason', 'Blocking reason'),
         field('intro', 'Intro'),

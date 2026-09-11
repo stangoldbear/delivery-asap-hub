@@ -11,25 +11,26 @@ import re
 import tempfile
 
 from . import settings as settings_module
-from .frontmatter import build_document, parse_frontmatter
+from .cardmd import build_card, parse_card
+from .domain import display_group, group_rank
 
-_MERMAID_RE = re.compile(r'```mermaid\n(.*?)\n```', re.DOTALL)
+_SAFE_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*$')
 
-
-def write_atomic(path, text):
+def write_atomic(path, data):
     """
     Replace a file's content without ever leaving a truncated file behind.
 
     Writing in place truncates immediately: an error halfway through would
     destroy a knowledge card. Write a sibling temp file, then rename.
+    `data` is text (written as UTF-8) or bytes.
     """
     directory = os.path.dirname(path) or '.'
     os.makedirs(directory, exist_ok=True)
     handle = tempfile.NamedTemporaryFile(
-        'w', encoding='utf-8', dir=directory, prefix='.tmp-', delete=False)
+        'wb', dir=directory, prefix='.tmp-', delete=False)
     try:
         with handle:
-            handle.write(text)
+            handle.write(data.encode('utf-8') if isinstance(data, str) else data)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(handle.name, path)
@@ -42,7 +43,7 @@ def write_atomic(path, text):
 
 
 class ProjectRepository:
-    """Markdown + front matter cards, one file per project."""
+    """Markdown cards, one file per project."""
 
     def __init__(self, directory=None, settings=None):
         self._settings = settings
@@ -68,10 +69,10 @@ class ProjectRepository:
         if not os.path.isfile(path):
             return None, None
         with open(path, 'r', encoding='utf-8') as handle:
-            return parse_frontmatter(handle.read())
+            return parse_card(handle.read())
 
     def read_raw(self, project_id):
-        """Return the file text (front matter + body), or None."""
+        """Return the card text as it is on disk, or None."""
         path = self.path_for(project_id)
         if not os.path.isfile(path):
             return None
@@ -87,7 +88,7 @@ class ProjectRepository:
         for path in sorted(glob.glob(os.path.join(self.directory, '*.md'))):
             try:
                 with open(path, 'r', encoding='utf-8') as handle:
-                    data, body = parse_frontmatter(handle.read())
+                    data, body = parse_card(handle.read())
             except OSError as exc:
                 print('Could not read project card:', path, exc)
                 continue
@@ -98,45 +99,119 @@ class ProjectRepository:
             data['_body'] = body
             data['_file'] = os.path.basename(path)
             data['_prio_num'] = as_int(data.get('priority'), 99)
+            data['_attachments'] = self.list_attachments(data.get('id', ''))
             projects.append(data)
 
-        order = list(self.settings.tiers)
-        default_rank = order.index(self.settings.default_tier)
+        # Group first, `priority` second: a number edited by hand into a card
+        # can only misplace it inside its own group, never move it out.
         projects.sort(key=lambda project: (
-            _rank(order, str(project.get('tier', '')).lower(), default_rank),
+            group_rank(display_group(project, self.settings), self.settings),
             project.get('_prio_num', 99),
             str(project.get('id', '')),
         ))
         return projects
 
-    def load_plan(self):
-        """The mermaid gantt block of the delivery plan, or '' when absent."""
-        path = self.settings.plan_path
+    # ─── Attachments ─────────────────────────────────────────────────────────
+    # Files of any type kept next to the cards, one folder per project. The
+    # folder listing is the only source of truth: nothing about attachments is
+    # written into the card, so the two can never drift apart.
+    def attachment_path(self, project_id, name):
+        """Path of one attachment; refuses anything that is not a plain file name."""
+        safe_project = os.path.basename(str(project_id))
+        safe_name = os.path.basename(str(name))
+        if not safe_project or not safe_name or safe_name != name or safe_name in ('.', '..'):
+            raise ValueError(f'Invalid attachment name: {name!r}')
+        return os.path.join(self.settings.attachments_dir, safe_project, safe_name)
+
+    def list_attachments(self, project_id):
+        """[{name, size, modified}] sorted by name, [] when the folder is absent."""
+        folder = os.path.join(self.settings.attachments_dir, os.path.basename(str(project_id)))
+        if not project_id or not os.path.isdir(folder):
+            return []
+        entries = []
+        for name in sorted(os.listdir(folder)):
+            path = os.path.join(folder, name)
+            if name.startswith('.') or not os.path.isfile(path):
+                continue                                  # temp files, OS junk
+            info = os.stat(path)
+            entries.append({'name': name, 'size': info.st_size, 'modified': info.st_mtime})
+        return entries
+
+    def save_attachment(self, project_id, name, data):
+        """Store bytes as a new attachment. Refuses to overwrite: deleting is explicit."""
+        path = self.attachment_path(project_id, name)
+        if os.path.exists(path):
+            raise FileExistsError(name)
+        write_atomic(path, data)
+
+    def delete_attachment(self, project_id, name):
+        """Remove one attachment. Returns False when it did not exist."""
+        path = self.attachment_path(project_id, name)
         if not os.path.isfile(path):
-            return ''
-        try:
-            with open(path, 'r', encoding='utf-8') as handle:
-                match = _MERMAID_RE.search(handle.read())
-        except OSError:
-            return ''
-        return match.group(1).strip() if match else ''
+            return False
+        os.remove(path)
+        folder = os.path.dirname(path)
+        if not os.listdir(folder):
+            os.rmdir(folder)                      # no empty folders left behind
+        return True
 
     # ─── Writes ──────────────────────────────────────────────────────────────
     def save(self, project_id, data, body=''):
         payload = {key: value for key, value in data.items() if not key.startswith('_')}
-        write_atomic(self.path_for(project_id), build_document(payload, body))
+        write_atomic(self.path_for(project_id), build_card(payload, body))
 
     def write_raw(self, project_id, text):
         """
-        Write raw text (front matter + body) after validating it.
+        Write the card text as typed, after validating it.
 
-        The text must contain a `---...---` block that parses back: a syntax
-        error in the RAW editor must never reach the file.
+        It must parse back as a card — a `# title` and at least one entry —
+        so a broken outline in the markdown editor never reaches the file.
         """
-        data, _ = parse_frontmatter(text)
-        if not data:
-            raise ValueError('The YAML front matter is missing, empty or invalid.')
+        data, _ = parse_card(text)
+        if len(data) < 2:
+            raise ValueError('The card must start with a `# title` line and hold '
+                             'at least one `- key: value` entry.')
         write_atomic(self.path_for(project_id), text if text.endswith('\n') else text + '\n')
+
+    # ─── The whole vault as one document ─────────────────────────────────────
+    # Every card, in the order the chart draws them. It is the monthly snapshot
+    # and the multi-card editor: one text to read, grep, diff and archive.
+    def vault_markdown(self):
+        """Every card concatenated, in tier and priority order."""
+        blocks = []
+        for project in self.list_all():
+            text = self.read_raw(project['id'])
+            if text:
+                blocks.append(text.strip())
+        return '\n\n'.join(blocks) + '\n' if blocks else ''
+
+    def apply_vault_markdown(self, text):
+        """
+        Write back a whole-vault document, one card per `# title` block.
+
+        A block whose id is unknown creates a card; a card whose block is
+        absent is left alone. Deleting is never a side effect of an edit that
+        happens not to mention something.
+        """
+        created, updated, skipped = [], [], []
+
+        for block in split_cards(text):
+            data, body = parse_card(block)
+            project_id = str(data.get('id', '') or '').strip()
+            if not data:
+                skipped.append(('(no title)', 'not a card: no `# title` line'))
+                continue
+            if not project_id:
+                skipped.append((data.get('name', '(untitled)'), 'no `- id:` entry'))
+                continue
+            if not _SAFE_ID_RE.match(project_id):
+                skipped.append((project_id, 'an id may only hold letters, digits, . _ and -'))
+                continue
+
+            (updated if self.exists(project_id) else created).append(project_id)
+            self.save(project_id, data, body)
+
+        return {'created': created, 'updated': updated, 'skipped': skipped}
 
     def mutate(self, project_id, mutator):
         """
@@ -158,8 +233,20 @@ class ProjectRepository:
 
 
 # ─── Shared helpers ──────────────────────────────────────────────────────────
-def _rank(order, tier, default_rank):
-    return order.index(tier) if tier in order else default_rank
+def split_cards(text):
+    """Split a multi-card document on its top-level `# ` headings."""
+    blocks, current = [], []
+    for line in str(text or '').replace('\r\n', '\n').split('\n'):
+        if line.startswith('# '):
+            if current:
+                blocks.append('\n'.join(current).strip())
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        blocks.append('\n'.join(current).strip())
+    return [block for block in blocks if block]
+
 
 
 def as_int(value, fallback):

@@ -3,57 +3,81 @@ Gantt chart rendering: header, tier rows, project rows, resource rows.
 
 Geometry and colours come from `domain`; layout metrics travel as CSS custom
 properties, so the stylesheet and the resize script never restate them.
+
+A tier reaches the markup as one custom property, `--tier`, set on the row: the
+stylesheet decides how much of it to spend (a rail and a marker), and the
+timeline lane beside it never takes it at all.
 """
 
 from . import settings as settings_module
 from .domain import (
     format_date_long,
-    group_by_tier,
-    member_name,
-    resolve_role,
-    resource_row_background,
-    role_color,
+    group_by_display,
+    group_color,
+    group_order,
+    group_title,
+    is_display_group,
+    project_milestones,
+    project_span,
+    project_tasks,
     summary_bar_color,
     tier_color,
-    tier_row_background,
-    tier_title,
+    tier_key,
 )
-from .markup import ensure_list, esc
+from .markup import attrs, esc, icon
+
+CARET_OPEN = '▲'
+CARET_CLOSED = '►'
 
 
-def render(projects, tasks, timeline, *, detail_row, settings=None):
+def render(projects, timeline, *, detail_row, settings=None):
     """
     The whole chart as one `<table>`.
 
-    `detail_row(project, tier)` is injected: the chart places the expandable
-    panel row but knows nothing about its contents.
+    Every bar comes from the card that owns it: the chart asks a project for
+    its span and its rows and draws them. `detail_row(project, tier)` is
+    injected, so the chart places the expandable panel but knows nothing about
+    its contents.
     """
     config = settings or settings_module.current()
-    grouped = group_by_tier(projects, config)
-    orphan_tasks = [task for task in tasks if not task['project_id']]
+    grouped = group_by_display(projects, config)
 
     parts = [_header(timeline, config)]
 
-    for tier in config.tiers:
-        tier_projects = grouped.get(tier, [])
-        is_other = tier == config.other_tier
-        if is_other and not orphan_tasks:
+    for group in group_order(config):
+        members = grouped.get(group, [])
+        # An empty tier is not drawn; DONE and DROPPED always are, because a
+        # project is finished by being dragged onto them.
+        if not members and not is_display_group(group):
             continue
-        if not is_other and not tier_projects:
-            continue
 
-        count = len(orphan_tasks) if is_other else len(tier_projects)
-        parts.append(_tier_header(tier, count, config))
-
-        for position, project in enumerate(tier_projects, start=1):
-            parts.extend(_project_block(project, tier, tasks, timeline, position,
-                                        detail_row, config))
-
-        if is_other:
-            parts.extend(_orphan_row(task, timeline, config) for task in orphan_tasks)
+        parts.append(_group_header(group, len(members), config))
+        for project in members:
+            parts.extend(_project_block(project, group, timeline, detail_row, config))
 
     parts.append('</tbody></table></div>')
     return '\n'.join(parts)
+
+
+def _day_classes(day, timeline):
+    """
+    The calendar header boxes every Monday-to-Friday run.
+
+    The weekday reads from the box rather than from a printed letter, and a
+    week cut in half by the start or the end of the scale is closed off where
+    it is cut.
+    """
+    classes = ['day-cell', f'day-cell--{timeline.day_state(day)}']
+    if day.weekday() >= 5:
+        classes.append('day-cell--weekend')
+        return classes
+
+    classes.append('day-cell--wd')
+    if day.weekday() == 0 or day == timeline.days[0]:
+        classes.append('day-cell--w-start')
+    if day.weekday() == 4 or day == timeline.days[-1]:
+        classes.append('day-cell--w-end')
+    return classes
 
 
 def _header(timeline, config):
@@ -62,8 +86,11 @@ def _header(timeline, config):
         f'{config.month_abbr[month - 1]} {year}</div>'
         for (year, month), count in timeline.months
     )
+    # The date travels with the cell: it is what turns a click at an x offset
+    # in a lane into the day the pointer is over.
     days = ''.join(
-        f'<div class="day-cell day-cell--{timeline.day_state(day)}">{day.day}</div>'
+        f'<div class="{" ".join(_day_classes(day, timeline))}" '
+        f'data-date="{day.strftime("%Y-%m-%d")}">{day.day}</div>'
         for day in timeline.days
     )
 
@@ -85,16 +112,14 @@ def _header(timeline, config):
   <thead>
     <tr>
       <th class="label-head sticky-col">
-        <div class="label-head__title">PROJECT &amp; ASSIGNED RESOURCES</div>
+        <div class="label-head__title">Project &amp; assigned resources</div>
       </th>
       <th class="timeline-head">
         <div class="timeline-strip">{months}</div>
       </th>
     </tr>
     <tr>
-      <th class="label-head sticky-col">
-        <div class="label-head__sub">Filter / expand the hierarchy</div>
-      </th>
+      <th class="label-head sticky-col"></th>
       <th class="timeline-head">
         <div class="timeline-strip">{days}</div>
       </th>
@@ -103,55 +128,55 @@ def _header(timeline, config):
   <tbody>'''
 
 
-def _tier_header(tier, count, config):
-    color = tier_color(tier, config)
-    return f'''<tr class="tier-row" data-tier="{esc(tier)}" style="border-top:2px solid {color}">
-  <td colspan="2" class="tier-row__cell">
-    <div class="tier-row__inner" style="border-left:5px solid {color}">
-      <button type="button" class="tier-toggle-btn" id="btn-tier-{esc(tier)}" data-action="toggle-tier" data-tier="{esc(tier)}">▼</button>
-      <span>{esc(tier_title(tier, config))}</span>
-      <span class="tier-row__count" style="background:{color}">{count}</span>
+def _group_header(group, count, config):
+    title = group_title(group, config)
+    return f'''<tr class="tier-row" data-group="{esc(group)}" style="--tier:{group_color(group, config)}">
+  <td class="sticky-col tier-row__cell">
+    <div class="tier-row__inner">
+      <button type="button" class="btn btn--ghost btn--sm btn--icon" id="btn-group-{esc(group)}" data-action="toggle-group" data-group="{esc(group)}" title="Collapse or expand this group" aria-label="Collapse or expand {esc(title)}">{CARET_OPEN}</button>
+      <span class="tier-row__marker"></span>
+      <span class="tier-row__title">{esc(title)}</span>
+      <span class="badge">{count}</span>
     </div>
   </td>
+  <td class="tier-row__band"></td>
 </tr>'''
 
 
-def _project_block(project, tier, tasks, timeline, position, detail_row, config):
-    project_id = project['id']
-    project_tasks = [task for task in tasks if task['project_id'] == project_id]
+def _project_block(project, group, timeline, detail_row, config):
+    rows_of_project = project_tasks(project, config)
+    rail = tier_color(tier_key(project, config), config)
 
-    rows = [_project_row(project, tier, project_tasks, timeline, position, config)]
-    rows.extend(_resource_row(project_id, tier, task, timeline, config)
-                for task in project_tasks)
-    rows.append(detail_row(project, tier))
+    rows = [_project_row(project, group, rows_of_project, timeline, config)]
+    rows.extend(_resource_row(project['id'], group, rail, task, timeline, config)
+                for task in rows_of_project)
+    rows.append(detail_row(project, group))
     return rows
 
 
-def _summary_bar(project_tasks, timeline, tier, status, config):
-    if not project_tasks:
+def _summary_bar(project, timeline, status, config):
+    span = project_span(project, config)
+    if not span:
         return ''
-    start = min(task['start'] for task in project_tasks)
-    end = max(task['end'] for task in project_tasks)
+    start, end = span
     geometry = timeline.geometry(start, end)
     if not geometry:
         return ''
     left, width = geometry
-    fill = summary_bar_color(tier, status, config)
+    fill = summary_bar_color(tier_key(project, config), status, config)
+    blocked = ' summary-bar--blocked' if status == 'blocked' else ''
     span = (f'{format_date_long(start, config)} → {format_date_long(end, config)}')
-    return (f'<div class="task-bar summary-bar" style="left:{left}px;width:{width}px;'
-            f'background:{fill};border:1px dashed {fill}" '
-            f'title="Project span: {esc(span)}"></div>')
+    return (f'<div class="task-bar summary-bar{blocked}" style="left:{left}px;width:{width}px;'
+            f'background:{fill}" title="Project span: {esc(span)}"'
+            f'{attrs(project=project["id"])} data-start="{start.strftime("%Y-%m-%d")}" '
+            f'data-end="{end.strftime("%Y-%m-%d")}">{_grips()}</div>')
 
 
-def _project_row(project, tier, project_tasks, timeline, position, config):
+def _project_row(project, group, rows_of_project, timeline, config):
     project_id = project['id']
     name = project.get('name', project_id)
     status = str(project.get('status', 'active')).lower()
     dates = project.get('dates') or {}
-    footprint = project.get('tech_footprint') or {}
-
-    color = tier_color(tier, config)
-    background = tier_row_background(tier, config)
 
     status_style = settings_module.STATUS_STYLES.get(status, settings_module.STATUS_FALLBACK)
     deadline_raw = dates.get('deadline_text') or dates.get('target_delivery') or 'N/A'
@@ -162,89 +187,108 @@ def _project_row(project, tier, project_tasks, timeline, position, config):
     reason = project.get('blocked_reason', '')
     tooltip = ''
     if status == 'blocked' and reason:
-        tooltip = ('<div class="blocked-tooltip"><strong>⚠️ Blocked:</strong> '
-                   f'{esc(reason)}</div>')
+        tooltip = f'<span class="blocked-tooltip"><strong>Blocked:</strong> {esc(reason)}</span>'
 
-    platforms = ''.join(f'<span class="plat-tag">{esc(tag)}</span>'
-                        for tag in ensure_list(footprint.get('platforms')))
+    disabled = '' if rows_of_project else ' disabled'
+    bar = _summary_bar(project, timeline, status, config)
+    warning = _warning(any(task['outside'] for task in rows_of_project),
+                       'A task on this project falls outside the span it declares')
 
-    disabled = '' if project_tasks else ' disabled'
-    bar = _summary_bar(project_tasks, timeline, tier, status, config)
-
-    # Line 1: priority + title + actions · line 2: status + deadline · line 3: platforms
-    return f'''<tr class="project-main-row" data-tier-child="{esc(tier)}" data-proj-id="{esc(project_id)}" style="background:{background}" draggable="true">
-  <td class="sticky-col project-cell" style="border-left:5px solid {color};background:{background}">
+    # One line: identity, then the two things that change (status, deadline),
+    # then the row actions, which only appear on hover or keyboard focus.
+    # The platform tags left the chart entirely — the detail panel lists them.
+    return f'''<tr class="project-main-row" data-group-child="{esc(group)}" data-proj-id="{esc(project_id)}" style="--tier:{tier_color(tier_key(project, config), config)}" draggable="true">
+  <td class="sticky-col project-cell">
     <div class="project-line project-line--head">
       <div class="project-identity">
-        <span class="drag-handle" title="Drag to reorder">☰</span>
-        <button type="button" class="proj-toggle-btn" id="btn-toggle-proj-{esc(project_id)}" data-action="toggle-project" data-project="{esc(project_id)}"{disabled}>▼</button>
-        <span class="prio-badge">#{position}</span>
-        <strong class="project-title" title="{esc(name)}">{esc(name)}</strong>
+        <span class="drag-handle" title="Drag to reorder">{icon('grip')}</span>
+        <button type="button" class="btn btn--ghost btn--sm btn--icon" id="btn-toggle-proj-{esc(project_id)}" data-action="toggle-project" data-project="{esc(project_id)}" title="Collapse or expand the resources" aria-label="Collapse or expand the resources of {esc(name)}"{disabled}>{CARET_OPEN}</button>
+        <span class="prio-badge">{esc(project.get('priority', ''))}</span>
+        <strong class="project-title" title="{esc(project_id)}">{esc(name)}</strong>{warning}
       </div>
-      <button type="button" class="action-btn" title="Open notes, tags and actions" data-action="toggle-detail" data-project="{esc(project_id)}">⚙️ Info &amp; actions</button>
-      <button type="button" class="action-btn action-btn--slate" title="Advanced edit (form + RAW)" data-action="advanced-edit-open" data-project="{esc(project_id)}">\U0001F6E0️ Advanced edit</button>
+      <span class="project-row__signals">
+        <span class="status-wrapper" tabindex="0">
+          <span class="status-pill" style="background:{status_style['bg']};color:{status_style['fg']}">{esc(status.upper())}</span>
+          {tooltip}
+        </span>
+        <span class="deadline-pill" style="background:{deadline_style['bg']};color:{deadline_style['fg']}">{esc(format_date_long(deadline_raw, config))} [{esc(deadline_type.upper())}]</span>
+      </span>
+      <span class="project-row__actions">
+        <button type="button" class="btn btn--ghost btn--sm btn--icon" title="Notes &amp; actions" aria-label="Notes and actions for {esc(name)}" data-action="toggle-detail" data-project="{esc(project_id)}">{icon('panel')}</button>
+        <button type="button" class="btn btn--ghost btn--sm btn--icon" title="Advanced edit" aria-label="Advanced edit of {esc(name)}" data-action="advanced-edit-open" data-project="{esc(project_id)}">{icon('sliders')}</button>
+      </span>
     </div>
-    <div class="project-line project-line--meta">
-      <div class="status-wrapper">
-        <span class="status-pill" style="background:{status_style['bg']};color:{status_style['fg']}">{esc(status.upper())}</span>
-        {tooltip}
-      </div>
-      <span class="deadline-pill" style="background:{deadline_style['bg']};color:{deadline_style['fg']}">\U0001F4C5 {esc(format_date_long(deadline_raw, config))} [{esc(deadline_type.upper())}]</span>
-    </div>
-    <div class="project-line project-line--platforms">{platforms}</div>
   </td>
   <td class="timeline-cell">
-    <div class="timeline-row timeline-row--project" style="background-color:{background}">{bar}</div>
+    <div class="timeline-row timeline-row--project" data-lane="{esc(project_id)}">{bar}{_milestones(project, timeline, config)}</div>
   </td>
 </tr>'''
 
 
-def _resource_row(project_id, tier, task, timeline, config):
+def _milestones(project, timeline, config):
+    """
+    The one motif of the interface, used for the one thing it means: a date
+    that matters. Centred on its day, and never hidden behind a bar.
+    """
+    marks = []
+    for mark in project_milestones(project, config):
+        geometry = timeline.geometry(mark['date'], mark['date'])
+        if not geometry:
+            continue
+        left = geometry[0] + (settings_module.COL_W / 2) - 2
+        label = f"{format_date_long(mark['date'], config)}"
+        if mark['text']:
+            label += f" — {mark['text']}"
+        marks.append(
+            f'<button type="button" class="milestone" style="left:{left:.0f}px" '
+            f'title="{esc(label)}" aria-label="{esc(label)}" data-action="milestone-open"'
+            f'{attrs(project=project["id"], milestone=mark["id"], text=mark["text"])}'
+            f' data-date="{mark["date"].strftime("%Y-%m-%d")}">{icon("diamond")}</button>')
+    return ''.join(marks)
+
+
+def _grips():
+    """The two edges a bar can be resized from; the middle moves the whole bar."""
+    return ('<span class="bar-grip bar-grip--start" data-grip="start"></span>'
+            '<span class="bar-grip bar-grip--end" data-grip="end"></span>')
+
+
+def _warning(condition, message):
+    """A row that does not add up says so, and says what does not add up."""
+    if not condition:
+        return ''
+    return (f'<span class="row-warning" title="{esc(message)}" '
+            f'aria-label="{esc(message)}">{icon("warning")}</span>')
+
+
+def _resource_row(project_id, group, rail, task, timeline, config):
     geometry = timeline.geometry(task['start'], task['end'])
     if not geometry:
         return ''
 
     left, width = geometry
-    member = member_name(task['section'], task['label'], config)
-    role = resolve_role(task['section'], task['label'], config)[0]
-    color = role_color(task['section'], task['label'], task['type'], config)
-    background = resource_row_background(tier, config)
+    color = task['color']
     span = f"{format_date_long(task['start'], config)} → {format_date_long(task['end'], config)}"
+    label = task['note'] or task['who']
+    classes = 'task-bar sub-bar' + (f' sub-bar--{task["type"]}' if task['type'] != 'default' else '')
 
-    bar = (f'<div class="task-bar sub-bar" style="left:{left}px;width:{width}px;background:{color}" '
-           f'title="{esc(task["label"])} — {esc(span)}">'
-           f'<span class="bar-text">{esc(member)}</span></div>')
+    bar = (f'<div class="{classes}" style="left:{left}px;width:{width}px;background:{color}" '
+           f'title="{esc(label)} — {esc(span)}"'
+           f'{attrs(project=project_id, task=task["id"])} '
+           f'data-start="{task["start"].strftime("%Y-%m-%d")}" '
+           f'data-end="{task["end"].strftime("%Y-%m-%d")}">'
+           f'<span class="bar-text">{esc(task["who"])}</span>{_grips()}</div>')
 
-    return f'''<tr class="resource-sub-row" data-tier-child="{esc(tier)}" data-proj-child="{esc(project_id)}">
-  <td class="sticky-col resource-cell" style="background:{background}">
+    return f'''<tr class="resource-sub-row" data-group-child="{esc(group)}" data-proj-child="{esc(project_id)}" style="--tier:{rail}">
+  <td class="sticky-col resource-cell">
     <div class="resource-line">
       <span class="resource-line__branch">└─</span>
-      <span class="resource-line__role" style="color:{color}">{esc(role)}:</span>
-      <span>{esc(member)}</span>
+      <span class="resource-line__role" style="color:{color}">{esc(task['role'])}:</span>
+      <span>{esc(task['who'])}</span>
+      {_warning(task['outside'], 'This task falls outside the span its project declares')}
     </div>
   </td>
   <td class="timeline-cell">
-    <div class="timeline-row timeline-row--resource" style="background-color:{background}">{bar}</div>
-  </td>
-</tr>'''
-
-
-def _orphan_row(task, timeline, config):
-    geometry = timeline.geometry(task['start'], task['end'])
-    if not geometry:
-        return ''
-
-    left, width = geometry
-    color = role_color(task['section'], task['label'], task['type'], config)
-    background = resource_row_background(config.other_tier, config)
-    bar = (f'<div class="task-bar sub-bar" style="left:{left}px;width:{width}px;background:{color}">'
-           f'<span class="bar-text">{esc(task["label"])}</span></div>')
-
-    return f'''<tr class="resource-sub-row" data-tier-child="{esc(config.other_tier)}">
-  <td class="sticky-col resource-cell resource-cell--flat" style="background:{background}">
-    <div class="resource-line"><strong>{esc(task["label"])}</strong></div>
-  </td>
-  <td class="timeline-cell">
-    <div class="timeline-row timeline-row--resource" style="background-color:{background}">{bar}</div>
+    <div class="timeline-row timeline-row--resource">{bar}</div>
   </td>
 </tr>'''

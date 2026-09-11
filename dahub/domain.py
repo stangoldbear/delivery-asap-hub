@@ -1,5 +1,5 @@
 """
-Domain logic: dates, tiers, roles, gantt parsing, timeline calendar.
+Domain logic: dates, tiers, roles, the timeline a card declares, calendar.
 
 Pure and testable: no I/O, no HTML, and no hidden clock — "today" is passed
 in so every rendering decision can be reproduced in a test.
@@ -12,9 +12,6 @@ from . import settings as settings_module
 
 _ISO_DATE_RE = re.compile(r'^(\d{4})[/-](\d{1,2})[/-](\d{1,2})(?:[ T](\d{1,2}:\d{2}))?$')
 _EU_DATE_RE = re.compile(r'^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})(?:[ T](\d{1,2}:\d{2}))?$')
-_GANTT_KEYWORDS = ('gantt', 'title', 'dateFormat', 'axisFormat', 'tickInterval', 'excludes')
-_DURATION_RE = re.compile(r'^\d+d$')
-_PLAN_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}')
 
 
 def _settings(settings=None):
@@ -72,16 +69,6 @@ def tier_color(key, settings=None):
     return settings_module.hex_color(tier_rgb(key, settings))
 
 
-def tier_row_background(key, settings=None):
-    """Tier colour at low alpha, for the project row background."""
-    return settings_module.rgba(tier_rgb(key, settings), settings_module.TIER_ROW_ALPHA)
-
-
-def resource_row_background(key, settings=None):
-    """Tier colour at very low alpha, for resource rows and detail panels."""
-    return settings_module.rgba(tier_rgb(key, settings), settings_module.RESOURCE_ROW_ALPHA)
-
-
 def tier_title(key, settings=None):
     config = _settings(settings)
     return config.tiers.get(key, config.tiers[config.default_tier])['title']
@@ -93,147 +80,228 @@ def summary_bar_color(key, status, settings=None):
     return tier_color(key, settings)
 
 
-def group_by_tier(projects, settings=None):
-    """Group projects by tier, preserving the declaration order of settings."""
+# ─── Display groups ─────────────────────────────────────────────────────────
+# The chart draws every tier in declaration order and then two further groups,
+# DONE and DROPPED, at the very bottom. A project lands in one of them because
+# of its status, whatever tier it carries — and the tier is left untouched, so
+# it survives the round trip and comes back when the project does.
+def display_group(project, settings=None):
+    status = str(project.get('status', '') or '').lower()
+    if status in settings_module.DISPLAY_GROUPS:
+        return status
+    return tier_key(project, settings)
+
+
+def group_order(settings=None):
+    return list(_settings(settings).tiers) + list(settings_module.DISPLAY_GROUPS)
+
+
+def is_display_group(key):
+    return key in settings_module.DISPLAY_GROUPS
+
+
+def group_title(key, settings=None):
+    group = settings_module.DISPLAY_GROUPS.get(key)
+    return group['title'] if group else tier_title(key, settings)
+
+
+def group_color(key, settings=None):
+    group = settings_module.DISPLAY_GROUPS.get(key)
+    return settings_module.hex_color(group['rgb']) if group else tier_color(key, settings)
+
+
+def group_by_display(projects, settings=None):
+    """Group projects by the band they are drawn in, in drawing order."""
     config = _settings(settings)
-    grouped = {key: [] for key in config.tiers}
+    grouped = {key: [] for key in group_order(config)}
     for project in projects:
-        grouped[tier_key(project, config)].append(project)
+        grouped[display_group(project, config)].append(project)
     return grouped
 
 
-# ─── Roles and people ────────────────────────────────────────────────────────
-def resolve_member(section, label, settings=None):
+def group_rank(key, settings=None):
+    order = group_order(settings)
+    return order.index(key) if key in order else len(order)
+
+
+# ─── Roles and people ───────────────────────────────────────────────────────
+def resolve_person(who, settings=None):
     """
-    The person a timeline row belongs to, matched on the label prefix.
+    Who a timeline row belongs to: {'name', 'role', 'color'}.
 
-    Returns the squad entry (name + role) or None. Prefixes are matched
-    longest-first, so `iOS Dev #10` never resolves as `iOS Dev #1`.
-    """
-    config = _settings(settings)
-    for member in config.squads.get(section, ()):
-        if label.startswith(member['prefix']):
-            return member
-    return None
-
-
-def resolve_role(section, label, settings=None):
-    """
-    Return (role_label, colour) for a timeline row.
-
-    The squad roster wins: it is explicit. Keyword rules only cover rows with
-    no matching member, so a task named "iOS: call the Server API" cannot be
-    mislabelled as backend work.
+    The roster in settings.toml is matched by name first, because that is what
+    a card writes. A label carrying a squad prefix (`iOS Dev #1`) still
+    resolves, longest prefix first, so a card written against the old plan
+    keeps working. Anything else falls back to a keyword rule and then to the
+    fallback role.
     """
     config = _settings(settings)
-    member = resolve_member(section, label, config)
-    if member and member.get('role'):
-        role = config.role(member['role'])
-        return role['label'], role['color']
+    text = str(who or '').strip()
 
-    haystack = f'{section} {label}'
+    members = [member for squad in config.squads.values() for member in squad]
+    for member in members:
+        if member['name'].lower() == text.lower():
+            role = config.role(member['role'])
+            return {'name': member['name'], 'role': role['label'], 'color': role['color']}
+
+    for member in sorted(members, key=lambda entry: -len(entry['prefix'])):
+        if text.startswith(member['prefix']):
+            role = config.role(member['role'])
+            return {'name': member['name'], 'role': role['label'], 'color': role['color']}
+
     for role in config.roles:
-        if any(word in haystack for word in role['keywords']):
-            return role['label'], role['color']
+        if any(word in text for word in role['keywords']):
+            return {'name': text, 'role': role['label'], 'color': role['color']}
+
     fallback = config.fallback_role
-    return fallback['label'], fallback['color']
+    return {'name': text or fallback['label'],
+            'role': fallback['label'], 'color': fallback['color']}
 
 
-def member_name(section, label, settings=None, default='Resource'):
-    member = resolve_member(section, label, settings)
-    return member['name'] if member else default
+# ─── The timeline a card declares ────────────────────────────────────────────
+def add_working_days(start, count):
+    """
+    `days` counts working days, which is how a delivery plan is written.
 
-
-def role_color(section, label, task_type, settings=None):
-    if task_type == 'done':          # time off
-        return _settings(settings).time_off_color
-    return resolve_role(section, label, settings)[1]
-
-
-# ─── Delivery plan (mermaid gantt) ───────────────────────────────────────────
-def _add_working_days(start, count):
+    The end is the working day `count` days after the start, so a span of one
+    day covers exactly one column and a span of 34 lands where the same task
+    written with an explicit end date lands.
+    """
     end, counted = start, 0
-    while counted < count:
+    while counted < max(1, count):
         end += timedelta(days=1)
         if end.weekday() < 5:
             counted += 1
     return end
 
 
-def _match_project(label, settings=None):
-    for code, project_id in _settings(settings).project_codes.items():
-        if re.search(r'\b' + re.escape(code) + r'\b', label):
-            return project_id
-    return None
+def _as_datetime(value):
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time())
+    text = str(value or '').strip()
+    match = _ISO_DATE_RE.match(text)
+    if not match:
+        return None
+    try:
+        return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        return None
 
 
-def _split_task_line(line):
-    marker = line.rfind(' :')
-    if marker != -1:
-        return line[:marker].strip(), line[marker + 2:].strip()
-    marker = line.find(':')
-    if marker == -1:
-        return None, None
-    return line[:marker].strip(), line[marker + 1:].strip()
+def _span(block, settings=None):
+    """(start, end) from `start` plus either `end` or `days`, or None."""
+    if not isinstance(block, dict):
+        return None
+    start = _as_datetime(block.get('start'))
+    if start is None:
+        return None
+
+    end = _as_datetime(block.get('end'))
+    if end is None:
+        try:
+            days = int(str(block.get('days', '')).strip())
+        except (TypeError, ValueError):
+            days = 0
+        end = add_working_days(start, days) if days else start
+    return start, max(end, start)
 
 
-def _task_type(modifiers):
+def flags_of(task):
+    """`flags` reads as a list or as an inline `crit, active`."""
+    value = task.get('flags') if isinstance(task, dict) else None
+    if isinstance(value, str):
+        return [flag.strip() for flag in value.split(',') if flag.strip()]
+    return [str(flag).strip() for flag in (value or [])]
+
+
+def _task_type(flags):
     for candidate in ('done', 'crit', 'active'):
-        if candidate in modifiers:
+        if candidate in flags:
             return candidate
     return 'default'
 
 
-def parse_gantt(gantt_code, settings=None):
-    """Turn a mermaid gantt block into structured tasks."""
-    config = _settings(settings)
-    tasks = []
-    section = 'Default'
+def project_tasks(project, settings=None):
+    """
+    The rows a card declares, as the chart consumes them.
 
-    for raw in gantt_code.split('\n'):
-        line = raw.strip()
-        if not line or line.startswith(_GANTT_KEYWORDS) or line.startswith('%%'):
+    A task carries who it belongs to, its span, its flags and whether it falls
+    outside the span its own project declares — which is a warning, never a
+    reason to drop the row.
+    """
+    timeline = project.get('timeline') or {}
+    span = _span(timeline)
+    rows = []
+
+    for entry in timeline.get('tasks') or []:
+        if not isinstance(entry, dict):
             continue
-        if line.startswith('section '):
-            section = line[8:].strip()
+        bounds = _span(entry)
+        if bounds is None:
             continue
-
-        label, remainder = _split_task_line(line)
-        if label is None:
-            continue
-
-        modifiers, date_parts = [], []
-        for part in (piece.strip() for piece in remainder.split(',')):
-            if _PLAN_DATE_RE.match(part) or _DURATION_RE.match(part):
-                date_parts.append(part)
-            else:
-                modifiers.extend(part.split())
-
-        if not date_parts:
-            continue
-
-        try:
-            start = datetime.strptime(date_parts[0], '%Y-%m-%d')
-            if len(date_parts) > 1:
-                duration = date_parts[1]
-                end = (_add_working_days(start, int(duration[:-1]))
-                       if _DURATION_RE.match(duration)
-                       else datetime.strptime(duration, '%Y-%m-%d'))
-            else:
-                end = start + timedelta(days=1)
-        except ValueError:
-            continue
-
-        tasks.append({
-            'label': label,
-            'section': section,
+        start, end = bounds
+        flags = flags_of(entry)
+        person = resolve_person(entry.get('who'), settings)
+        rows.append({
+            'id': entry.get('id', ''),
+            'project_id': project.get('id', ''),
+            'who': person['name'],
+            'role': person['role'],
+            'color': person['color'],
+            'note': str(entry.get('note', '') or ''),
             'start': start,
             'end': end,
-            'type': _task_type(modifiers),
-            'project_id': _match_project(label, config),
+            'type': _task_type(flags),
+            'outside': bool(span and (start < span[0] or end > span[1])),
         })
+    return rows
 
-    return tasks
+
+def project_milestones(project, settings=None):
+    """The dated marks a card declares, in date order, invalid dates dropped."""
+    marks = []
+    for entry in project.get('milestones') or []:
+        if not isinstance(entry, dict):
+            continue
+        when = _as_datetime(entry.get('date'))
+        if when is None:
+            continue
+        marks.append({
+            'id': str(entry.get('id', '') or ''),
+            'date': when,
+            'text': str(entry.get('text', '') or ''),
+        })
+    return sorted(marks, key=lambda mark: mark['date'])
+
+
+def project_span(project, settings=None):
+    """
+    The bar drawn for the project itself.
+
+    The declared span wins and exists even with no tasks; a card that has not
+    declared one yet still draws, derived from its rows.
+    """
+    span = _span((project.get('timeline') or {}))
+    if span:
+        return span
+    rows = project_tasks(project, settings)
+    if not rows:
+        return None
+    return min(row['start'] for row in rows), max(row['end'] for row in rows)
+
+
+def chart_spans(projects, settings=None):
+    """Every bar in the chart, as the calendar needs to see it: {start, end}."""
+    spans = []
+    for project in projects:
+        span = project_span(project, settings)
+        if span:
+            spans.append({'start': span[0], 'end': span[1]})
+        spans.extend({'start': row['start'], 'end': row['end']}
+                     for row in project_tasks(project, settings))
+    return spans
 
 
 # ─── Timeline calendar ───────────────────────────────────────────────────────

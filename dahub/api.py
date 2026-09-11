@@ -7,10 +7,12 @@ Loading, serialising and writing the file are centralised in
 the server never changes.
 """
 
+import re
 from datetime import datetime
 
-from . import schema
-from .repository import csv_to_list
+from . import schema, settings as settings_module
+from .markup import render_markdown
+from .repository import csv_to_list, ensure_dict
 
 
 class ApiError(Exception):
@@ -25,6 +27,10 @@ class ApiError(Exception):
 def _update_project(data, params, _now):
     """Quick edit: the fields exposed by the inline detail panel."""
     schema.apply_fields(data, params, schema.quick_fields())
+    # Free text is markdown, and the browser cannot render it: the value is
+    # handed back as HTML by the one renderer there is.
+    if 'intro' in params:
+        return {'html': {'intro': render_markdown(data.get('intro'))}}
 
 
 def _advanced_update_project(data, params, _now):
@@ -39,10 +45,10 @@ def _advanced_update_project(data, params, _now):
 
 
 def _raw_update_project(repository, project_id, params):
-    """Store the raw text (front matter + body) from the RAW editor."""
+    """Store the card text as typed in the markdown tab."""
     text = params.get('raw_text')
     if not text or not str(text).strip():
-        raise ApiError('The RAW text cannot be empty.')
+        raise ApiError('The card text cannot be empty.')
     try:
         repository.write_raw(project_id, text)
     except ValueError as exc:
@@ -55,13 +61,15 @@ def _add_todo(data, params, now):
         raise ApiError('The note text is required.')
 
     todos = csv_to_list(data.get('todos'))
-    todos.append({
+    todo = {
         'id': f"todo-{data.get('id', 'project')}-{len(todos) + 1}-{int(now.timestamp())}",
         'text': text,
         'deadline': str(params.get('deadline', '')).strip(),
-        'done': False,
-    })
+    }
+    todos.append(todo)
     data['todos'] = todos
+    # Handed back so the browser can add the row without reloading the page.
+    return {'todo': todo, 'html': render_markdown(text)}
 
 
 def _update_todo(data, params, _now):
@@ -70,48 +78,146 @@ def _update_todo(data, params, _now):
     if not text:
         raise ApiError('The note text is required.')
 
-    for collection in ('todos', 'todos_history'):
+    for collection in ('todos', 'done'):
         for item in csv_to_list(data.get(collection)):
             if item.get('id') == todo_id:
                 item['text'] = text
                 item['deadline'] = str(params.get('deadline', '')).strip()
-                return
+                return {'todo': item, 'html': render_markdown(text)}
     raise ApiError('Note not found.', status=404)
 
 
 def _toggle_todo(data, params, now):
     todo_id = _require_todo_id(params)
     todos = csv_to_list(data.get('todos'))
-    history = csv_to_list(data.get('todos_history'))
+    history = csv_to_list(data.get('done'))
 
+    # The category is the state: a note is open because it sits under `todos`
+    # and completed because it sits under `done`. There is no flag to disagree
+    # with the list it is in.
+    completed = True
     for index, item in enumerate(todos):
         if item.get('id') == todo_id:
-            done = todos.pop(index)
-            done['done'] = True
-            done['completed_at'] = now.strftime('%Y-%m-%d %H:%M')
-            history.insert(0, done)
+            moved = todos.pop(index)
+            moved['completed_at'] = now.strftime('%Y-%m-%d %H:%M')
+            history.insert(0, moved)
             break
     else:
         for index, item in enumerate(history):
             if item.get('id') == todo_id:
-                reopened = history.pop(index)
-                reopened['done'] = False
-                reopened.pop('completed_at', None)
-                todos.append(reopened)
+                moved = history.pop(index)
+                moved.pop('completed_at', None)
+                todos.append(moved)
+                completed = False
                 break
         else:
             raise ApiError('Note not found.', status=404)
 
     data['todos'] = todos
-    data['todos_history'] = history
+    data['done'] = history
+    return {'todo': moved, 'completed': completed,
+            'html': render_markdown(moved.get('text'))}
 
 
 def _delete_todo(data, params, _now):
     todo_id = _require_todo_id(params)
-    for collection in ('todos', 'todos_history'):
+    for collection in ('todos', 'done'):
         if collection in data:
             data[collection] = [item for item in csv_to_list(data.get(collection))
                                 if item.get('id') != todo_id]
+
+
+_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
+def _save_milestone(data, params, now):
+    """
+    Add or update one dated mark.
+
+    A milestone without a date is not a milestone, so the date is required and
+    checked here rather than stored and skipped at render time.
+    """
+    date = str(params.get('date', '')).strip()
+    if not _DATE_RE.match(date):
+        raise ApiError('A milestone needs a date, as YYYY-MM-DD.')
+
+    text = str(params.get('text', '')).strip()
+    milestones = csv_to_list(data.get('milestones'))
+    milestone_id = str(params.get('milestone_id', '') or '').strip()
+
+    for item in milestones:
+        if isinstance(item, dict) and item.get('id') == milestone_id:
+            item['date'], item['text'] = date, text
+            data['milestones'] = milestones
+            return {'milestone': item}
+
+    created = {
+        'id': f"milestone-{data.get('id', 'project')}-{len(milestones) + 1}-{int(now.timestamp())}",
+        'date': date,
+        'text': text,
+    }
+    milestones.append(created)
+    data['milestones'] = milestones
+    return {'milestone': created}
+
+
+def _move_timeline(data, params, _now):
+    """
+    Move or resize one bar: a task when `task_id` is given, the project span
+    otherwise.
+
+    The browser sends the two dates it computed from the columns it moved over;
+    they are checked here, because a drag that ends outside the scale must not
+    be able to write a date the card cannot represent.
+    """
+    start = str(params.get('start', '')).strip()
+    end = str(params.get('end', '')).strip()
+    if not _DATE_RE.match(start) or not _DATE_RE.match(end):
+        raise ApiError('A bar needs a start and an end, as YYYY-MM-DD.')
+    if end < start:
+        raise ApiError('A bar cannot end before it starts.')
+
+    timeline = ensure_dict(data, 'timeline')
+    task_id = str(params.get('task_id', '') or '').strip()
+
+    if not task_id:
+        timeline['start'], timeline['end'] = start, end
+        timeline.pop('days', None)      # one way of saying it, not two
+        return {'timeline': {'start': start, 'end': end}}
+
+    for task in csv_to_list(timeline.get('tasks')):
+        if isinstance(task, dict) and task.get('id') == task_id:
+            task['start'], task['end'] = start, end
+            task.pop('days', None)
+            return {'task': task}
+    raise ApiError('Timeline row not found.', status=404)
+
+
+def _delete_milestone(data, params, _now):
+    milestone_id = str(params.get('milestone_id', '') or '').strip()
+    if not milestone_id:
+        raise ApiError('Missing `milestone_id` parameter.')
+    data['milestones'] = [item for item in csv_to_list(data.get('milestones'))
+                          if not (isinstance(item, dict) and item.get('id') == milestone_id)]
+
+
+def _reorder_todos(data, params, _now):
+    """
+    Reorder the open notes.
+
+    A note the browser did not mention keeps its place at the end rather than
+    disappearing: a reorder is not a delete, whatever the payload forgot.
+    """
+    order = params.get('order')
+    if not isinstance(order, list):
+        raise ApiError('Missing or invalid `order` parameter.')
+
+    remaining = {item.get('id'): item for item in csv_to_list(data.get('todos'))
+                 if isinstance(item, dict)}
+    reordered = [remaining.pop(todo_id) for todo_id in order if todo_id in remaining]
+    reordered.extend(remaining.values())
+    data['todos'] = reordered
+    return {'order': [item.get('id') for item in reordered]}
 
 
 def _require_todo_id(params):
@@ -129,10 +235,14 @@ ROUTES = {
     'todo/update': _update_todo,
     'todo/toggle': _toggle_todo,
     'todo/delete': _delete_todo,
+    'todo/reorder': _reorder_todos,
+    'timeline/move': _move_timeline,
+    'milestone/save': _save_milestone,
+    'milestone/delete': _delete_milestone,
 }
 
 # "Raw" actions bypass the parse → dict → dump round trip and work on the file
-# text directly (used by the RAW tab of the advanced editor).
+# text directly (used by the markdown tab of the advanced editor).
 RAW_ROUTES = {
     'raw-update': _raw_update_project,
 }
@@ -142,45 +252,124 @@ BATCH_ID = '_batch'
 
 def _reorder_projects(repository, params, _now):
     """
-    Apply a new ordering: `order` is a list of {id, tier} in display order.
+    Apply a new ordering: `order` is a list of {id, group} in display order.
 
-    Priority is stored per tier, so the number in a card matches its rank
-    inside its own tier.
+    A group is a tier or one of the two display groups, and the drop target
+    decides what happens: dropped onto a tier, a project takes that tier and
+    comes back to life if it was finished or abandoned; dropped onto DONE or
+    DROPPED, it takes that status and keeps the tier it belongs to.
+
+    `priority` is the project's position over the whole chart, so the number in
+    the card is the number on the screen. Only the cards whose position or
+    group actually changed are written.
     """
     order = params.get('order')
     if not isinstance(order, list):
         raise ApiError("Missing or invalid `order` parameter.")
 
-    tiers = repository.settings.tiers
-    position = {tier: 0 for tier in tiers}
-    updated = 0
+    groups = set(repository.settings.tiers) | set(settings_module.DISPLAY_GROUPS)
+    position, updated = 0, 0
 
     for item in order:
         if not isinstance(item, dict):
             continue
-        project_id, tier = item.get('id'), item.get('tier')
-        if not project_id or not tier:
+        project_id, group = item.get('id'), item.get('group')
+        if not project_id or not group:
             continue
-        if tier not in tiers:
-            raise ApiError(f'Unknown tier: {tier}')
-        if not repository.exists(project_id):
+        if group not in groups:
+            raise ApiError(f'Unknown group: {group}')
+        data, _ = repository.load(project_id)
+        if data is None:
             continue
 
-        position[tier] += 1
+        position += 1
+        wanted = _placement(data, group, position)
+        if all(str(data.get(key, '')) == value for key, value in wanted.items()):
+            continue
 
-        def mutator(data, tier=tier, rank=position[tier]):
-            data['tier'] = tier
-            data['priority'] = str(rank)
-
-        repository.mutate(project_id, mutator)
+        repository.mutate(project_id, lambda card, values=wanted: card.update(values))
         updated += 1
 
     return {'updated': updated}
 
 
+def _placement(data, group, rank):
+    """What the card should say after being dropped into `group` at `rank`."""
+    if group in settings_module.DISPLAY_GROUPS:
+        return {'status': group, 'priority': str(rank)}
+
+    status = str(data.get('status', 'active')).lower()
+    if status in settings_module.DISPLAY_GROUPS:
+        status = 'active'          # dragged back up: it is being worked on again
+    return {'tier': group, 'status': status, 'priority': str(rank)}
+
+
+def _write_vault_markdown(repository, params, _now):
+    """
+    Apply a whole-vault document: one card per `# title` block.
+
+    Never a delete: a card whose block is not in the text is left alone, so an
+    edit that happens not to mention something cannot remove it.
+    """
+    text = params.get('markdown')
+    if not text or not str(text).strip():
+        raise ApiError('The document is empty.')
+
+    result = repository.apply_vault_markdown(text)
+    if not result['created'] and not result['updated']:
+        raise ApiError('No card block found: every card starts with a `# title` line.')
+    return result
+
+
 BATCH_ROUTES = {
     'reorder': _reorder_projects,
+    'markdown': _write_vault_markdown,
 }
+
+
+# ─── Attachments ─────────────────────────────────────────────────────────────
+# Not JSON mutations of a card: the payload is the file itself and nothing is
+# written into the card, so they sit beside the routing table rather
+# than in it.
+_ATTACHMENT_NAME_MAX = 200
+_ATTACHMENT_NAME_BAD = re.compile(r'[\x00-\x1f/\\]')
+
+
+def clean_attachment_name(name):
+    """A plain file name: no path separators, no control characters."""
+    text = str(name or '').strip()
+    if (not text or text in ('.', '..') or len(text) > _ATTACHMENT_NAME_MAX
+            or _ATTACHMENT_NAME_BAD.search(text)):
+        raise ApiError('Invalid file name.')
+    return text
+
+
+def upload_attachment(repository, project_id, name, data):
+    """Store one uploaded file. Never overwrites: removing is a separate, explicit act."""
+    _require_project(repository, project_id)
+    name = clean_attachment_name(name)
+    if not data:
+        raise ApiError('The file is empty.')
+    try:
+        repository.save_attachment(project_id, name, data)
+    except FileExistsError:
+        raise ApiError(f'An attachment named {name} already exists — remove it first.',
+                       status=409)
+    except ValueError as exc:
+        raise ApiError(str(exc))
+    return {'success': True, 'project': project_id, 'attachment': name}
+
+
+def delete_attachment(repository, project_id, name):
+    _require_project(repository, project_id)
+    name = clean_attachment_name(name)
+    try:
+        removed = repository.delete_attachment(project_id, name)
+    except ValueError as exc:
+        raise ApiError(str(exc))
+    if not removed:
+        raise ApiError('Attachment not found.', status=404)
+    return {'success': True, 'project': project_id, 'attachment': name}
 
 
 def dispatch(repository, project_id, action, params, *, now=None):
@@ -205,8 +394,12 @@ def dispatch(repository, project_id, action, params, *, now=None):
             raise ApiError(f'Unknown action: {action}', status=404)
         _require_project(repository, project_id)
 
-        repository.mutate(project_id, lambda data: mutator(data, params, now))
-        return {'success': True, 'project': project_id, 'action': action}
+        # A mutator may hand back what it created or moved, so the browser can
+        # patch that one row instead of reloading the whole document.
+        result = {}
+        repository.mutate(project_id,
+                          lambda data: result.update(mutator(data, params, now) or {}))
+        return {'success': True, 'project': project_id, 'action': action, **result}
     except schema.ValidationError as exc:
         raise ApiError(str(exc))
 

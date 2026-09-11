@@ -8,6 +8,8 @@ The sample vault doubles as the fixture: every case the renderer and the API
 have to survive is a real card in `sample-vault/`.
 """
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -19,14 +21,18 @@ import urllib.request
 from datetime import date, datetime
 
 from dahub import gantt, markup, schema, settings as settings_module, view
-from dahub.api import ApiError, dispatch
+from dahub.api import ApiError, delete_attachment, dispatch, upload_attachment
 from dahub.domain import (
-    Timeline, format_date_long, group_by_tier, member_name, parse_gantt,
-    resolve_role, tier_key,
+    Timeline, chart_spans, display_group, format_date_long, group_by_display,
+    project_milestones, project_span, project_tasks, resolve_person, tier_key,
 )
-from dahub.frontmatter import build_document, parse_frontmatter, parse_yaml_text
-from dahub.repository import ProjectRepository, csv_to_list, write_atomic
-from dahub.server import create_server
+from dahub.cardmd import build_card, parse_card
+from dahub.migrate import convert, import_plan, migrate_vault, parse_plan
+from dahub.repository import (
+    ProjectRepository, csv_to_list, split_cards, write_atomic,
+)
+from dahub import server as server_module
+from dahub.server import _TOKEN_COOKIE, create_server
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 SAMPLE_VAULT = os.path.join(REPO_ROOT, 'sample-vault')
@@ -38,60 +44,199 @@ def sample_settings():
     return settings_module.configure(vault=SAMPLE_VAULT)
 
 
-class FrontMatterTest(unittest.TestCase):
+class CardFormatTest(unittest.TestCase):
+    """The card is the storage: what a person types has to survive a save."""
+
     def test_round_trip_preserves_structure(self):
         data = {
-            'id': 'p1',
             'name': "Designer's name & \"brand\"",
+            'id': 'p1',
             'tech_footprint': {'platforms': ['iOS', 'Backend (dev)'], 'content_impact': True},
             'risks_and_criticalities': [
                 {'id': 'RISK-01', 'description': 'Depends on: team X', 'severity': 'high'}],
             'confluence': ['https://x.test/a', 'https://x.test/b'],
-            'todos': [],
-            'jira': {},
         }
-        back, body = parse_frontmatter(build_document(data, 'the body'))
+        text = build_card(data, 'the body')
+        back, body = parse_card(text)
         self.assertEqual(back, data)
+        # `## Notes` belongs to the format, not to the text under it.
+        self.assertIn('## Notes\n\nthe body', text)
         self.assertEqual(body, 'the body')
 
-    def test_inline_comment_is_not_part_of_the_value(self):
-        """BUG-1: `tier: tier-1 # core` used to silently become tier-3."""
-        data = parse_yaml_text('tier: tier-1 # tier-1 (core)\nstatus: active # or blocked\n')
-        self.assertEqual(data['tier'], 'tier-1')
-        self.assertEqual(data['status'], 'active')
+    def test_the_title_is_the_project_name(self):
+        data, _ = parse_card('# Navigation menu — second level\n- id: p1\n')
+        self.assertEqual(data['name'], 'Navigation menu — second level')
+        self.assertTrue(build_card(data).startswith('# Navigation menu — second level\n'))
 
-    def test_hash_inside_a_value_survives(self):
-        data = parse_yaml_text('url: https://x.test/p#frag\nname: "release #42"\n')
-        self.assertEqual(data['url'], 'https://x.test/p#frag')
-        self.assertEqual(data['name'], 'release #42')
+    def test_a_url_is_a_value_and_never_a_key(self):
+        """`- https://x` used to read as a key named `https`."""
+        data, _ = parse_card('# T\n- confluence\n  - https://x.test/p#frag\n')
+        self.assertEqual(data['confluence'], ['https://x.test/p#frag'])
+        data, _ = parse_card('# T\n- note: Menu API: v2 is late\n')
+        self.assertEqual(data['note'], 'Menu API: v2 is late')
 
-    def test_block_scalars_are_read_and_written(self):
-        """BUG-2: `notes: |` used to parse as the string '|', losing the body."""
-        data = parse_yaml_text('notes: |-\n  first\n  second\nother: 1\n')
-        self.assertEqual(data['notes'], 'first\nsecond')
-        self.assertEqual(data['other'], '1')
+    def test_multi_line_values_are_fenced_and_nest(self):
+        card = {'name': 'T', 'intro': 'one\ntwo "quoted"\n\nfour'}
+        text = build_card(card)
+        self.assertIn('- intro:\n  ```md', text)
+        self.assertEqual(parse_card(text)[0], card)
 
-        multiline = {'id': 'x', 'intro': 'one\ntwo "quoted"\n\nfour'}
-        document = build_document(multiline)
-        self.assertIn('intro: |-', document)
-        self.assertEqual(parse_frontmatter(document)[0], multiline)
+        nested = {'name': 'T', 'intro': 'see:\n```py\nx = 1\n```'}
+        # The fence has to be longer than the longest run inside the value.
+        self.assertIn('````md', build_card(nested))
+        self.assertEqual(parse_card(build_card(nested))[0], nested)
 
-    def test_folded_scalar_joins_lines(self):
-        self.assertEqual(parse_yaml_text('s: >-\n  a\n  b\n')['s'], 'a b')
+    def test_a_group_reads_as_map_list_or_objects(self):
+        data, _ = parse_card(
+            '# T\n'
+            '- timeline\n'
+            '  - start: 2026-08-24\n'
+            '  - tasks\n'
+            '    - task-1\n'
+            '      - who: Ada Lovelace\n'
+            '      - flags\n'
+            '        - crit\n'
+            '- platforms\n'
+            '  - iOS\n')
+        self.assertEqual(data['timeline']['start'], '2026-08-24')
+        self.assertEqual(data['timeline']['tasks'],
+                         [{'id': 'task-1', 'who': 'Ada Lovelace', 'flags': ['crit']}])
+        self.assertEqual(data['platforms'], ['iOS'])
 
-    def test_url_in_a_list_is_not_an_inline_map(self):
-        data = parse_yaml_text('confluence:\n  - https://x.test/a\n')
+    def test_booleans_and_the_empty_string(self):
+        data, _ = parse_card('# T\n- content_impact: true\n- qa: false\n- blocked_reason:\n')
+        self.assertIs(data['content_impact'], True)
+        self.assertIs(data['qa'], False)
+        self.assertEqual(data['blocked_reason'], '')
+
+    def test_an_object_without_an_id_is_given_one(self):
+        text = build_card({'name': 'T', 'upstream': [{'team': 'Backend'}, {'team': 'Infra'}]})
+        self.assertIn('- upstream-1', text)
+        self.assertEqual(parse_card(text)[0]['upstream'][1],
+                         {'id': 'upstream-2', 'team': 'Infra'})
+        # `new` is the placeholder a hand-written entry may carry.
+        replaced = build_card({'name': 'T', 'todos': [{'id': 'new', 'text': 'x'}]})
+        self.assertIn('- todos-1', replaced)
+
+    def test_a_document_without_a_title_is_not_a_card(self):
+        self.assertEqual(parse_card('just markdown'), ({}, 'just markdown'))
+
+    def test_unknown_keys_survive_a_round_trip(self):
+        data, _ = parse_card('# T\n- id: p1\n- something_nobody_reads: kept\n')
+        self.assertIn('- something_nobody_reads: kept', build_card(data))
+
+
+class MigrationTest(unittest.TestCase):
+    """One-way conversion of a pre-0.1.0 YAML vault."""
+
+    YAML_CARD = (
+        '---\n'
+        'id: "p1"\n'
+        'name: "A project"\n'
+        'tier: "tier-1" # core\n'
+        'intro: |-\n'
+        '  first\n'
+        '  second\n'
+        'confluence:\n'
+        '  - "https://x.test/a"\n'
+        'todos:\n'
+        '  - id: "todo-1"\n'
+        '    text: "open one"\n'
+        '    done: false\n'
+        'todos_history:\n'
+        '  - id: "todo-2"\n'
+        '    text: "closed one"\n'
+        '    done: true\n'
+        '    completed_at: "2026-08-26 17:40"\n'
+        '---\n'
+        '\n'
+        '## Notes\n'
+        '\n'
+        'Body text.\n'
+    )
+
+    def test_conversion_renames_the_history_and_drops_the_flag(self):
+        data, body = parse_card(convert(self.YAML_CARD))
+        self.assertEqual(data['name'], 'A project')
+        self.assertEqual(data['tier'], 'tier-1')          # the comment stays dropped
+        self.assertEqual(data['intro'], 'first\nsecond')
         self.assertEqual(data['confluence'], ['https://x.test/a'])
+        self.assertEqual(data['todos'], [{'id': 'todo-1', 'text': 'open one'}])
+        self.assertEqual(data['done'], [{'id': 'todo-2', 'text': 'closed one',
+                                         'completed_at': '2026-08-26 17:40'}])
+        self.assertNotIn('todos_history', data)
+        self.assertEqual(body, 'Body text.')
 
-    def test_missing_front_matter_returns_the_body(self):
-        self.assertEqual(parse_frontmatter('# just markdown'), ({}, '# just markdown'))
+    PLAN = (
+        '# Delivery plan\n'
+        '\n'
+        '```mermaid\n'
+        'gantt\n'
+        '    dateFormat YYYY-MM-DD\n'
+        '\n'
+        '    section iOS\n'
+        '    iOS Dev #1 P1 menu integration  :crit, active, 2026-09-14, 25d\n'
+        '    QA #2 time off                  :done, 2026-09-21, 5d\n'
+        '    iOS Dev #9 P99 unknown project  :2026-09-21, 5d\n'
+        '```\n'
+    )
+
+    def test_a_plan_row_moves_into_the_card_that_owns_it(self):
+        rows = parse_plan(self.PLAN)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[0]['flags'], ['crit', 'active'])
+        self.assertEqual(rows[0]['end'].date(), date(2026, 10, 19))    # 25 working days
+
+        settings = sample_settings()
+        with tempfile.TemporaryDirectory() as folder:
+            vault = os.path.join(folder, 'vault')
+            shutil.copytree(SAMPLE_VAULT, vault)
+            config = settings_module.configure(vault=vault)
+            repo = ProjectRepository(settings=config)
+            plan = os.path.join(folder, 'plan.md')
+            with open(plan, 'w', encoding='utf-8') as handle:
+                handle.write(self.PLAN)
+
+            summary = import_plan(repo, plan, {'P1': 'project-1-navigation-menu'})
+            self.assertEqual(summary['imported'], {'project-1-navigation-menu': 1})
+            self.assertEqual([reason for _, reason in summary['skipped']],
+                             ['no project code', 'no project code'])
+
+            card = repo.load('project-1-navigation-menu')[0]
+            task = card['timeline']['tasks'][0]
+            self.assertEqual(task['who'], 'Rita Levi')       # resolved from the prefix
+            self.assertEqual(task['note'], 'menu integration')
+            self.assertEqual(task['flags'], ['crit', 'active'])
+            self.assertEqual(card['timeline']['start'], '2026-09-14')
+            # `dates.started` is absorbed: one fact, one field.
+            self.assertNotIn('started', card.get('dates', {}))
+            # the file it was read from is left alone
+            with open(plan, encoding='utf-8') as handle:
+                self.assertEqual(handle.read(), self.PLAN)
+        settings_module.configure(vault=SAMPLE_VAULT)
+
+    def test_migrating_a_vault_backs_up_and_refuses_to_run_twice(self):
+        with tempfile.TemporaryDirectory() as folder:
+            card = os.path.join(folder, 'p1.md')
+            with open(card, 'w', encoding='utf-8') as handle:
+                handle.write(self.YAML_CARD)
+
+            first = migrate_vault(folder)
+            self.assertEqual(first['converted'], ['p1.md'])
+            with open(card + '.bak', encoding='utf-8') as handle:
+                self.assertEqual(handle.read(), self.YAML_CARD)
+
+            converted = open(card, encoding='utf-8').read()
+            second = migrate_vault(folder)
+            self.assertEqual(second['converted'], [])
+            self.assertEqual(second['skipped'], ['p1.md'])
+            self.assertEqual(open(card, encoding='utf-8').read(), converted)
 
 
 class SettingsTest(unittest.TestCase):
     def test_sample_settings_load(self):
         config = sample_settings()
         self.assertEqual(config.default_tier, 'tier-3')
-        self.assertEqual(config.other_tier, list(config.tiers)[-1])
         self.assertIn('iOS', config.squads)
 
     def test_unknown_default_tier_is_rejected(self):
@@ -103,6 +248,34 @@ class SettingsTest(unittest.TestCase):
                              '[defaults]\ntier="nope"\n[[tiers]]\nkey="t1"\ntitle="T"\nrgb=[1,2,3]\n')
             with self.assertRaises(settings_module.SettingsError):
                 settings_module.load(path)
+
+    def test_a_local_file_layers_over_the_shipped_one(self):
+        """A two-line override must not have to restate tiers, squads and roles."""
+        original = settings_module.LOCAL_SETTINGS_PATH
+        with tempfile.TemporaryDirectory() as tmp:
+            local = os.path.join(tmp, 'settings.local.toml')
+            with open(local, 'w') as handle:
+                handle.write('[vault]\nroot = "sample-vault"\n\n[app]\ntitle = "Local name"\n')
+            settings_module.LOCAL_SETTINGS_PATH = local
+            try:
+                merged = settings_module.load()
+            finally:
+                settings_module.LOCAL_SETTINGS_PATH = original
+
+        self.assertTrue(merged.projects_dir.endswith('sample-vault/02-projects/active'))
+        self.assertEqual(merged.title, 'Local name')
+        # everything the local file stayed silent about is inherited
+        self.assertEqual(list(merged.tiers), ['tier-1', 'tier-2', 'tier-3'])
+        self.assertIn('iOS', merged.squads)
+        self.assertEqual(merged.subtitle,
+                         settings_module.load(settings_module.DEFAULT_SETTINGS_PATH).subtitle)
+
+    def test_a_list_in_a_local_file_replaces_it_whole(self):
+        base = {'tiers': [{'key': 'a'}, {'key': 'b'}], 'app': {'title': 'T', 'owner': 'O'}}
+        merged = settings_module._overlay(base, {'tiers': [{'key': 'c'}],
+                                                 'app': {'title': 'X'}})
+        self.assertEqual(merged['tiers'], [{'key': 'c'}])
+        self.assertEqual(merged['app'], {'title': 'X', 'owner': 'O'})
 
     def test_missing_file_is_reported(self):
         with self.assertRaises(settings_module.SettingsError):
@@ -125,10 +298,14 @@ class VaultTestCase(unittest.TestCase):
 
 
 class RepositoryTest(VaultTestCase):
-    def test_cards_are_ordered_by_tier_then_priority(self):
+    def test_cards_are_ordered_by_display_group_then_priority(self):
         ids = [project['id'] for project in self.repo.list_all()]
         self.assertEqual(ids[0], 'project-1-navigation-menu')
-        self.assertEqual(ids[-1], 'project-11-checkout-hardening')  # unknown tier sorts last
+        # DONE and DROPPED are drawn under every tier, in that order
+        self.assertEqual(ids[-2:],
+                         ['project-10-delivery-estimate', 'project-12-accessibility-audit'])
+        # an unknown tier still sorts with the default one, above them
+        self.assertEqual(ids[-3], 'project-11-checkout-hardening')
 
     def test_path_traversal_is_refused(self):
         path = self.repo.path_for('../../etc/passwd')
@@ -160,8 +337,66 @@ class RepositoryTest(VaultTestCase):
             self.repo.write_raw('project-1-navigation-menu', 'no front matter here')
         self.assertEqual(self.repo.read_raw('project-1-navigation-menu'), before)
 
-    def test_plan_is_read_from_the_vault(self):
-        self.assertIn('gantt', self.repo.load_plan())
+    def test_the_whole_vault_reads_and_writes_as_one_document(self):
+        text = self.repo.vault_markdown()
+        self.assertEqual(len(split_cards(text)), len(self.repo.list_all()))
+        # tier and priority order, the same the chart draws
+        self.assertTrue(text.startswith('# Navigation menu'))
+
+        edited = text.replace('- priority: 1\n', '- priority: 1\n- extra_key: kept\n', 1)
+        edited += '\n# Brand new\n- id: project-99-brand-new\n- tier: tier-3\n'
+        result = self.repo.apply_vault_markdown(edited)
+
+        self.assertEqual(result['created'], ['project-99-brand-new'])
+        self.assertEqual(len(result['updated']), len(self.repo.list_all()) - 1)
+        self.assertEqual(self.repo.load('project-1-navigation-menu')[0]['extra_key'], 'kept')
+
+    def test_a_card_missing_from_the_document_is_never_deleted(self):
+        before = len(self.repo.list_all())
+        one = self.repo.read_raw('project-1-navigation-menu')
+        self.repo.apply_vault_markdown(one)
+        self.assertEqual(len(self.repo.list_all()), before)
+
+    def test_a_block_that_cannot_name_a_card_is_reported_not_written(self):
+        result = self.repo.apply_vault_markdown(
+            '# No id here\n- tier: tier-1\n\n'
+            '# Bad id\n- id: ../escape\n\n'
+            'not a card at all\n')
+        self.assertEqual(result['created'], [])
+        self.assertEqual(result['updated'], [])
+        self.assertEqual([reason for _, reason in result['skipped']],
+                         ['no `- id:` entry', 'an id may only hold letters, digits, . _ and -'])
+
+    def test_attachments_are_listed_from_the_folder_and_never_from_the_card(self):
+        project = 'project-6-designer-name'
+        self.assertEqual(self.repo.list_attachments(project), [])
+        self.repo.save_attachment(project, 'brief.pdf', b'%PDF-1.4 stub')
+        self.repo.save_attachment(project, 'notes.md', 'hello\n')
+        listed = self.repo.list_attachments(project)
+        self.assertEqual([(a['name'], a['size']) for a in listed],
+                         [('brief.pdf', 13), ('notes.md', 6)])
+
+        card = next(p for p in self.repo.list_all() if p['id'] == project)
+        self.assertEqual(len(card['_attachments']), 2)
+        self.repo.mutate(project, lambda data: None)
+        self.assertNotIn('_attachments', self.repo.read_raw(project))
+
+    def test_attachment_names_cannot_escape_the_folder(self):
+        for bad in ('../card.md', 'a/b.txt', '..', '.', ''):
+            with self.subTest(name=bad), self.assertRaises(ValueError):
+                self.repo.attachment_path('project-1-navigation-menu', bad)
+
+    def test_attachment_upload_never_overwrites(self):
+        self.repo.save_attachment('project-1-navigation-menu', 'x.txt', b'one')
+        with self.assertRaises(FileExistsError):
+            self.repo.save_attachment('project-1-navigation-menu', 'x.txt', b'two')
+        self.assertTrue(self.repo.delete_attachment('project-1-navigation-menu', 'x.txt'))
+        self.assertFalse(self.repo.delete_attachment('project-1-navigation-menu', 'x.txt'))
+
+        self.repo.save_attachment('project-9-store-credit', 'only.txt', b'x')
+        self.repo.delete_attachment('project-9-store-credit', 'only.txt')
+        self.assertFalse(os.path.isdir(os.path.join(self.settings.attachments_dir,
+                                                    'project-9-store-credit')))
 
     def test_csv_coercion(self):
         self.assertEqual(csv_to_list('iOS, QA'), ['iOS', 'QA'])
@@ -172,8 +407,8 @@ class RepositoryTest(VaultTestCase):
 class DomainTest(unittest.TestCase):
     def setUp(self):
         self.settings = sample_settings()
-        self.tasks = parse_gantt(
-            ProjectRepository(settings=self.settings).load_plan(), self.settings)
+        self.projects = ProjectRepository(settings=self.settings).list_all()
+        self.spans = chart_spans(self.projects, self.settings)
 
     def test_date_formats(self):
         self.assertEqual(format_date_long('2026-08-24', self.settings), '24 August 26')
@@ -185,35 +420,70 @@ class DomainTest(unittest.TestCase):
         self.assertEqual(tier_key({'tier': 'tier-9'}, self.settings), 'tier-3')
         self.assertEqual(tier_key({}, self.settings), 'tier-3')
 
-    def test_roles_come_from_the_roster_not_from_keywords(self):
-        role, _ = resolve_role('iOS', 'iOS Dev #1 call the Server API', self.settings)
-        self.assertEqual(role, 'iOS Dev')
-        self.assertEqual(member_name('iOS', 'iOS Dev #1 anything', self.settings), 'Rita Levi')
-        self.assertEqual(member_name('iOS', 'Contractor #7 x', self.settings), 'Resource')
+    def test_a_person_resolves_by_name_and_still_by_the_old_prefix(self):
+        self.assertEqual(resolve_person('Rita Levi', self.settings),
+                         {'name': 'Rita Levi', 'role': 'iOS Dev', 'color': '#1e88e5'})
+        # A card written when the timeline lived in a plan file still resolves.
+        self.assertEqual(resolve_person('iOS Dev #1 anything', self.settings)['name'],
+                         'Rita Levi')
+        # Nobody in the roster: the keyword rule, then the fallback role.
+        self.assertEqual(resolve_person('iOS contractor', self.settings)['role'], 'iOS Dev')
+        self.assertEqual(resolve_person('Somebody Else', self.settings)['role'], 'Member')
 
-    def test_gantt_modifiers_and_project_codes(self):
-        by_label = {task['label']: task for task in self.tasks}
-        self.assertEqual(by_label['Backend Dev #1 P1 Menu API v2']['type'], 'crit')
-        self.assertEqual(by_label['QA #2 time off']['type'], 'done')
-        self.assertEqual(by_label['Backend Dev #1 P1 Menu API v2']['project_id'],
-                         'project-1-navigation-menu')
-        self.assertIsNone(by_label['Company all-hands']['project_id'])
-        self.assertIsNone(by_label['iOS Dev #9 P99 unknown project']['project_id'])
+    def test_milestones_are_dated_marks_in_date_order(self):
+        card = {'id': 'x', 'milestones': [
+            {'id': 'milestone-2', 'date': '2026-11-14', 'text': 'Store submission'},
+            {'id': 'milestone-1', 'date': '2026-10-09', 'text': 'API frozen'},
+            {'id': 'milestone-3', 'text': 'no date, no mark'},
+        ]}
+        marks = project_milestones(card, self.settings)
+        self.assertEqual([mark['id'] for mark in marks], ['milestone-1', 'milestone-2'])
 
-    def test_duration_counts_working_days_only(self):
-        task = next(t for t in self.tasks if t['label'] == 'Backend Dev #1 P8 banner config')
-        self.assertEqual(task['start'].date(), date(2026, 9, 2))
-        self.assertEqual(task['end'].date(), date(2026, 9, 16))   # 10 working days
+    def test_a_card_owns_its_bars(self):
+        card = next(p for p in self.projects if p['id'] == 'project-1-navigation-menu')
+        start, end = project_span(card, self.settings)
+        self.assertEqual((start.date(), end.date()), (date(2026, 8, 24), date(2026, 11, 20)))
+
+        rows = project_tasks(card, self.settings)
+        self.assertEqual(rows[0]['who'], 'Ada Lovelace')
+        self.assertEqual(rows[0]['role'], 'Backend Dev')
+        self.assertEqual(rows[0]['type'], 'crit')
+        self.assertFalse(any(row['outside'] for row in rows))
+
+    def test_a_span_may_be_declared_in_working_days(self):
+        card = {'id': 'x', 'timeline': {'start': '2026-09-02', 'days': '10'}}
+        start, end = project_span(card, self.settings)
+        self.assertEqual((start.date(), end.date()), (date(2026, 9, 2), date(2026, 9, 16)))
+
+    def test_a_project_bar_exists_without_a_single_task(self):
+        card = {'id': 'x', 'timeline': {'start': '2026-09-02', 'end': '2026-09-30'}}
+        self.assertIsNotNone(project_span(card, self.settings))
+        self.assertEqual(project_tasks(card, self.settings), [])
+
+    def test_a_task_outside_its_project_span_is_flagged_not_dropped(self):
+        card = {'id': 'x', 'timeline': {
+            'start': '2026-09-02', 'end': '2026-09-30',
+            'tasks': [{'id': 'task-1', 'who': 'Rita Levi', 'start': '2026-11-02',
+                       'end': '2026-11-06'}]}}
+        rows = project_tasks(card, self.settings)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]['outside'])
+
+    def test_flags_read_as_a_list_or_inline(self):
+        card = {'id': 'x', 'timeline': {'tasks': [
+            {'id': 't1', 'who': 'x', 'start': '2026-09-02', 'days': '2',
+             'flags': 'crit, active'}]}}
+        self.assertEqual(project_tasks(card, self.settings)[0]['type'], 'crit')
 
     def test_timeline_covers_past_and_future_tasks(self):
-        timeline = Timeline(self.tasks, settings=self.settings, today=TODAY)
+        timeline = Timeline(self.spans, settings=self.settings, today=TODAY)
         self.assertEqual(timeline.days[0].date(), date(2026, 1, 12))
         self.assertGreaterEqual(timeline.days[-1].date(), date(2027, 3, 31))
         self.assertIsNotNone(timeline.today_index)
         self.assertTrue(all(day.weekday() < 5 for day in timeline.days))
 
     def test_hide_past_drops_earlier_days(self):
-        timeline = Timeline(self.tasks, settings=self.settings, hide_past=True, today=TODAY)
+        timeline = Timeline(self.spans, settings=self.settings, hide_past=True, today=TODAY)
         self.assertEqual(timeline.days[0].date(), TODAY)
         self.assertEqual(timeline.today_index, 0)
 
@@ -222,10 +492,20 @@ class DomainTest(unittest.TestCase):
         far = datetime(2030, 1, 1)
         self.assertIsNone(timeline.geometry(far, far))
 
-    def test_grouping_keeps_the_declared_tier_order(self):
-        grouped = group_by_tier([{'tier': 'tier-9'}, {'tier': 'tier-1'}], self.settings)
-        self.assertEqual(list(grouped), list(self.settings.tiers))
+    def test_grouping_keeps_the_declared_order_and_ends_with_the_two_groups(self):
+        grouped = group_by_display(
+            [{'tier': 'tier-9'}, {'tier': 'tier-1'},
+             {'tier': 'tier-1', 'status': 'done'}, {'tier': 'tier-2', 'status': 'dropped'}],
+            self.settings)
+        self.assertEqual(list(grouped), list(self.settings.tiers) + ['done', 'dropped'])
         self.assertEqual(len(grouped['tier-3']), 1)      # the unknown tier lands here
+        self.assertEqual(len(grouped['done']), 1)
+        self.assertEqual(len(grouped['dropped']), 1)
+
+    def test_a_finished_project_keeps_the_tier_it_belongs_to(self):
+        card = {'tier': 'tier-1', 'status': 'done'}
+        self.assertEqual(display_group(card, self.settings), 'done')
+        self.assertEqual(tier_key(card, self.settings), 'tier-1')
 
 
 class SchemaAndApiTest(VaultTestCase):
@@ -259,9 +539,9 @@ class SchemaAndApiTest(VaultTestCase):
     def test_advanced_update_leaves_untouched_fields_alone(self):
         before, _ = self.repo.load(self.PROJECT)
         dispatch(self.repo, self.PROJECT, 'advanced-update',
-                 {'dates': {'started': '2026-08-25'}, 'body': 'replaced body'}, now=NOW)
+                 {'dates': {'soft_deadline': '2026-11-05'}, 'body': 'replaced body'}, now=NOW)
         after, body = self.repo.load(self.PROJECT)
-        self.assertEqual(after['dates']['started'], '2026-08-25')
+        self.assertEqual(after['dates']['soft_deadline'], '2026-11-05')
         self.assertEqual(after['dates']['deadline_type'], before['dates']['deadline_type'])
         self.assertEqual(after['todos'], before['todos'])
         self.assertEqual(after['intro'], before['intro'])
@@ -283,7 +563,7 @@ class SchemaAndApiTest(VaultTestCase):
                  {'todo_id': todo_id, 'text': 'edited', 'deadline': '2026-10-01'}, now=NOW)
         dispatch(self.repo, self.PROJECT, 'todo/toggle', {'todo_id': todo_id}, now=NOW)
         data, _ = self.repo.load(self.PROJECT)
-        done = next(item for item in data['todos_history'] if item['id'] == todo_id)
+        done = next(item for item in data['done'] if item['id'] == todo_id)
         self.assertEqual(done['text'], 'edited')
         self.assertEqual(done['completed_at'], '2026-09-09 10:30')
 
@@ -300,21 +580,109 @@ class SchemaAndApiTest(VaultTestCase):
         with self.assertRaises(ApiError):
             dispatch(self.repo, self.PROJECT, 'todo/add', {'text': '   '}, now=NOW)
 
-    def test_reorder_numbers_projects_inside_their_own_tier(self):
+    def test_notes_are_reordered_and_never_lost(self):
+        before = [item['id'] for item in self.repo.load(self.PROJECT)[0]['todos']]
+        self.assertGreater(len(before), 1)
+
+        dispatch(self.repo, self.PROJECT, 'todo/reorder',
+                 {'order': list(reversed(before))}, now=NOW)
+        self.assertEqual([item['id'] for item in self.repo.load(self.PROJECT)[0]['todos']],
+                         list(reversed(before)))
+
+        # a payload that forgets a note leaves it where it is, at the end
+        dispatch(self.repo, self.PROJECT, 'todo/reorder', {'order': [before[0]]}, now=NOW)
+        after = [item['id'] for item in self.repo.load(self.PROJECT)[0]['todos']]
+        self.assertEqual(after[0], before[0])
+        self.assertEqual(sorted(after), sorted(before))
+
+    def test_the_project_name_is_editable_from_the_panel(self):
+        dispatch(self.repo, self.PROJECT, 'update', {'name': 'Renamed from the panel'},
+                 now=NOW)
+        self.assertEqual(self.repo.load(self.PROJECT)[0]['name'], 'Renamed from the panel')
+        # the name is the card's title line, so the file says it too
+        self.assertTrue(self.repo.read_raw(self.PROJECT)
+                        .startswith('# Renamed from the panel\n'))
+
+    def test_a_milestone_is_added_edited_and_deleted(self):
+        result = dispatch(self.repo, self.PROJECT, 'milestone/save',
+                          {'date': '2026-12-01', 'text': 'Store submission'}, now=NOW)
+        created = result['milestone']['id']
+        self.assertEqual(self.repo.load(self.PROJECT)[0]['milestones'][-1]['text'],
+                         'Store submission')
+
+        dispatch(self.repo, self.PROJECT, 'milestone/save',
+                 {'milestone_id': created, 'date': '2026-12-02', 'text': 'Moved'}, now=NOW)
+        stored = [item for item in self.repo.load(self.PROJECT)[0]['milestones']
+                  if item['id'] == created]
+        self.assertEqual(stored, [{'id': created, 'date': '2026-12-02', 'text': 'Moved'}])
+
+        dispatch(self.repo, self.PROJECT, 'milestone/delete',
+                 {'milestone_id': created}, now=NOW)
+        self.assertNotIn(created, [item['id'] for item
+                                   in self.repo.load(self.PROJECT)[0]['milestones']])
+
+    def test_a_bar_is_moved_and_resized_by_dates(self):
+        dispatch(self.repo, self.PROJECT, 'timeline/move',
+                 {'task_id': 'task-1', 'start': '2026-08-31', 'end': '2026-10-16'}, now=NOW)
+        task = self.repo.load(self.PROJECT)[0]['timeline']['tasks'][0]
+        self.assertEqual((task['start'], task['end']), ('2026-08-31', '2026-10-16'))
+
+        dispatch(self.repo, self.PROJECT, 'timeline/move',
+                 {'start': '2026-08-31', 'end': '2026-11-27'}, now=NOW)
+        timeline = self.repo.load(self.PROJECT)[0]['timeline']
+        self.assertEqual((timeline['start'], timeline['end']), ('2026-08-31', '2026-11-27'))
+
+    def test_a_bar_cannot_be_moved_to_a_date_the_card_cannot_hold(self):
+        for payload in ({'start': 'yesterday', 'end': '2026-10-16'},
+                        {'start': '2026-10-16', 'end': '2026-08-31'},
+                        {'task_id': 'nope', 'start': '2026-10-01', 'end': '2026-10-16'}):
+            with self.assertRaises(ApiError):
+                dispatch(self.repo, self.PROJECT, 'timeline/move', payload, now=NOW)
+
+    def test_a_milestone_without_a_date_is_refused(self):
+        with self.assertRaises(ApiError):
+            dispatch(self.repo, self.PROJECT, 'milestone/save',
+                     {'text': 'someday'}, now=NOW)
+        with self.assertRaises(ApiError):
+            dispatch(self.repo, self.PROJECT, 'milestone/save',
+                     {'date': 'mid December', 'text': 'someday'}, now=NOW)
+
+    def test_reorder_numbers_projects_over_the_whole_chart(self):
+        """`priority` is a position in the chart, not a rank inside a tier."""
         result = dispatch(self.repo, '_batch', 'reorder', {'order': [
-            {'id': 'project-3-home-redesign', 'tier': 'tier-1'},
-            {'id': self.PROJECT, 'tier': 'tier-1'},
-            {'id': 'project-8-banner-defaults', 'tier': 'tier-3'},
+            {'id': 'project-3-home-redesign', 'group': 'tier-1'},
+            {'id': self.PROJECT, 'group': 'tier-1'},
+            {'id': 'project-8-banner-defaults', 'group': 'tier-3'},
         ]}, now=NOW)
         self.assertEqual(result['updated'], 3)
         self.assertEqual(self.repo.load('project-3-home-redesign')[0]['priority'], '1')
         self.assertEqual(self.repo.load(self.PROJECT)[0]['priority'], '2')
-        self.assertEqual(self.repo.load('project-8-banner-defaults')[0]['priority'], '1')
+        self.assertEqual(self.repo.load('project-8-banner-defaults')[0]['priority'], '3')
 
-    def test_reorder_refuses_an_unknown_tier(self):
+    def test_a_project_is_finished_by_dropping_it_and_revived_by_dragging_it_back(self):
+        dispatch(self.repo, '_batch', 'reorder',
+                 {'order': [{'id': self.PROJECT, 'group': 'done'}]}, now=NOW)
+        card = self.repo.load(self.PROJECT)[0]
+        self.assertEqual(card['status'], 'done')
+        self.assertEqual(card['tier'], 'tier-1')          # the tier is left untouched
+
+        dispatch(self.repo, '_batch', 'reorder',
+                 {'order': [{'id': self.PROJECT, 'group': 'tier-2'}]}, now=NOW)
+        card = self.repo.load(self.PROJECT)[0]
+        self.assertEqual(card['status'], 'active')        # back to being worked on
+        self.assertEqual(card['tier'], 'tier-2')
+
+    def test_reorder_writes_only_what_moved(self):
+        order = [{'id': project['id'], 'group': display_group(project, self.settings)}
+                 for project in self.repo.list_all()]
+        dispatch(self.repo, '_batch', 'reorder', {'order': order}, now=NOW)
+        again = dispatch(self.repo, '_batch', 'reorder', {'order': order}, now=NOW)
+        self.assertEqual(again['updated'], 0)
+
+    def test_reorder_refuses_an_unknown_group(self):
         with self.assertRaises(ApiError):
             dispatch(self.repo, '_batch', 'reorder',
-                     {'order': [{'id': self.PROJECT, 'tier': 'tier-42'}]}, now=NOW)
+                     {'order': [{'id': self.PROJECT, 'group': 'tier-42'}]}, now=NOW)
 
     def test_unknown_action_and_unknown_project(self):
         for project_id, action in ((self.PROJECT, 'nope'), ('ghost', 'update')):
@@ -329,25 +697,81 @@ class SchemaAndApiTest(VaultTestCase):
         self.assertEqual(self.repo.read_raw(self.PROJECT), before)
 
         dispatch(self.repo, self.PROJECT, 'raw-update',
-                 {'raw_text': '---\nid: "%s"\nname: "Renamed"\n---\n\nbody\n' % self.PROJECT},
+                 {'raw_text': '# Renamed\n- id: %s\n\n## Notes\n\nbody\n' % self.PROJECT},
                  now=NOW)
         self.assertEqual(self.repo.load(self.PROJECT)[0]['name'], 'Renamed')
+
+
+class AttachmentApiTest(VaultTestCase):
+    PROJECT = 'project-8-banner-defaults'
+
+    def test_upload_and_delete(self):
+        result = upload_attachment(self.repo, self.PROJECT, 'colours.csv', b'market,hex\n')
+        self.assertEqual(result['attachment'], 'colours.csv')
+        self.assertEqual([a['name'] for a in self.repo.list_attachments(self.PROJECT)],
+                         ['colours.csv'])
+        delete_attachment(self.repo, self.PROJECT, 'colours.csv')
+        self.assertEqual(self.repo.list_attachments(self.PROJECT), [])
+
+    def test_bad_names_empty_files_and_duplicates_are_refused(self):
+        for bad in ('', '..', 'a/b.txt', 'a\\b.txt', 'x\x00y', 'n' * 201):
+            with self.subTest(name=bad), self.assertRaises(ApiError):
+                upload_attachment(self.repo, self.PROJECT, bad, b'data')
+        with self.assertRaises(ApiError):
+            upload_attachment(self.repo, self.PROJECT, 'empty.txt', b'')
+
+        upload_attachment(self.repo, self.PROJECT, 'once.txt', b'1')
+        with self.assertRaises(ApiError) as caught:
+            upload_attachment(self.repo, self.PROJECT, 'once.txt', b'2')
+        self.assertEqual(caught.exception.status, 409)
+
+    def test_unknown_project_or_attachment_is_404(self):
+        with self.assertRaises(ApiError) as caught:
+            upload_attachment(self.repo, 'ghost', 'a.txt', b'x')
+        self.assertEqual(caught.exception.status, 404)
+        with self.assertRaises(ApiError) as caught:
+            delete_attachment(self.repo, self.PROJECT, 'missing.txt')
+        self.assertEqual(caught.exception.status, 404)
+
+
+class EmptyVaultTest(VaultTestCase):
+    """A fresh clone has no vault; the first message a new user sees must help."""
+
+    def report(self, config):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            server_module._report_empty_vault(config)
+        return buffer.getvalue()
+
+    def test_a_vault_with_cards_says_nothing(self):
+        self.assertEqual(self.report(self.settings), '')
+
+    def test_a_missing_or_empty_vault_names_the_way_out(self):
+        missing = settings_module.configure(
+            vault=os.path.join(self.tmp, 'nowhere'))
+        empty_dir = os.path.join(self.tmp, 'empty', '02-projects', 'active')
+        os.makedirs(empty_dir)
+        empty = settings_module.configure(vault=os.path.join(self.tmp, 'empty'))
+
+        for config in (missing, empty):
+            text = self.report(config)
+            self.assertIn('the dashboard will be empty', text)
+            self.assertIn('--vault PATH', text)
+            self.assertIn('--vault sample-vault', text)
 
 
 class ViewTest(unittest.TestCase):
     def setUp(self):
         self.settings = sample_settings()
         self.repo = ProjectRepository(settings=self.settings)
+        self.spans = chart_spans(self.repo.list_all(), self.settings)
         self.projects = self.repo.list_all()
-        self.tasks = parse_gantt(self.repo.load_plan(), self.settings)
-        self.html = view.render_page(self.projects, self.tasks, today=TODAY,
-                                     settings=self.settings)
+        self.html = view.render_page(self.projects, today=TODAY, settings=self.settings)
 
     def test_page_renders_every_tier_and_project(self):
         for project in self.projects:
             self.assertIn(f'data-proj-id="{project["id"]}"', self.html)
         self.assertIn('TIER 1 — CORE &amp; COMPLIANCE', self.html)
-        self.assertIn('OPERATIONAL &amp; TEAM TIME OFF', self.html)
 
     def test_special_characters_are_escaped(self):
         self.assertIn('Designer&#x27;s name &amp; brand page &quot;phase 2&quot;', self.html)
@@ -357,8 +781,8 @@ class ViewTest(unittest.TestCase):
         """An empty section used to claim `(1)` because of its placeholder row."""
         card = next(p for p in self.projects if p['id'] == 'project-6-designer-name')
         detail = view.render_detail_row(card, 'tier-2', self.settings)
-        self.assertIn('<span>Confluence (0):</span>', detail)
-        self.assertIn('<span>Epics (1):</span>', detail)
+        self.assertIn('Confluence (<span data-count="confluence_links">0</span>)', detail)
+        self.assertIn('Epics (<span data-count="jira_epics">1</span>)', detail)
 
     def test_unknown_status_is_not_silently_replaced(self):
         card = next(p for p in self.projects if p['id'] == 'project-11-checkout-hardening')
@@ -373,22 +797,170 @@ class ViewTest(unittest.TestCase):
         self.assertIn('value="javascript:alert(1)"', detail)   # kept as text, not as a link
 
     def test_project_without_tasks_has_a_disabled_caret(self):
-        chart = gantt.render(self.projects, self.tasks,
-                             Timeline(self.tasks, settings=self.settings, today=TODAY),
+        chart = gantt.render(self.projects,
+                             Timeline(self.spans, settings=self.settings, today=TODAY),
                              detail_row=lambda project, tier: '', settings=self.settings)
-        self.assertIn('id="btn-toggle-proj-project-7-menu-endpoint" '
-                      'data-action="toggle-project" data-project="project-7-menu-endpoint" '
-                      'disabled', chart)
+        button = chart.split('id="btn-toggle-proj-project-7-menu-endpoint"')[1].split('>')[0]
+        self.assertIn('data-project="project-7-menu-endpoint"', button)
+        self.assertIn('disabled', button)
 
     def test_layout_metrics_travel_as_css_variables(self):
         self.assertIn('--label-w:340px', self.html)
         self.assertIn('--col-w:17px', self.html)
-        self.assertNotIn('http://', self.html.split('<body>')[0])   # no external asset
+        head = self.html.split('<body>')[0]
+        # No external asset: the favicon is a data URI, and the SVG namespace
+        # inside it is an identifier, not a request.
+        self.assertNotIn('href="http', head)
+        self.assertNotIn('src="http', head)
+
+    def test_attachments_render_with_size_and_a_remove_button(self):
+        card = next(p for p in self.projects if p['id'] == 'project-1-navigation-menu')
+        detail = view.render_detail_row(card, 'tier-1', self.settings)
+        self.assertIn('Attachments (2)', detail)
+        self.assertIn('href="/api/project/project-1-navigation-menu/attachments/kickoff-notes.md"',
+                      detail)
+        self.assertIn('data-action="attachment-delete"', detail)
+        self.assertIn('data-name="menu-mockup.png"', detail)
+        empty = view.render_detail_row({'id': 'x'}, 'tier-1', self.settings)
+        self.assertIn('No file attached.', empty)
+        self.assertEqual(markup.human_size(1536), '1.5 KB')
+
+    def test_markdown_is_escaped_before_it_is_transformed(self):
+        """The one property that makes rendering free text safe."""
+        rendered = markup.render_markdown('<script>alert(1)</script> **bold**')
+        self.assertIn('&lt;script&gt;', rendered)
+        self.assertNotIn('<script>', rendered)
+        self.assertIn('<strong>bold</strong>', rendered)
+
+    def test_markdown_renders_the_subset_and_nothing_else(self):
+        rendered = markup.render_markdown(
+            '# Heading\n\n'
+            'Some **bold**, *italic* and `a*b` code.\n'
+            'A second line.\n\n'
+            '- one\n'
+            '- two\n\n'
+            'See [docs](https://x.test/a) and https://y.test/b')
+        self.assertIn('<h4>Heading</h4>', rendered)
+        self.assertIn('<strong>bold</strong>', rendered)
+        self.assertIn('<em>italic</em>', rendered)
+        self.assertIn('<code>a*b</code>', rendered)          # `*` inside code stays
+        self.assertIn('A second line.', rendered.split('<br>')[1])
+        self.assertIn('<ul><li>one</li><li>two</li></ul>', rendered)
+        self.assertIn('<a href="https://x.test/a" target="_blank"', rendered)
+        self.assertIn('>https://y.test/b</a>', rendered)     # a bare URL is a link
+        self.assertEqual(markup.render_markdown('   '), '')
+
+    def test_a_dangerous_link_never_survives_the_renderer(self):
+        self.assertNotIn('javascript:',
+                         markup.render_markdown('[x](javascript:alert(1))'))
 
     def test_markup_helpers(self):
         self.assertEqual(markup.ensure_list('a,b'), ['a,b'])        # never splits
         self.assertEqual(markup.safe_url('javascript:x'), '')
         self.assertEqual(markup.safe_url('https://x.test'), 'https://x.test')
+
+
+class TokenTest(VaultTestCase):
+    """The gate that stands between the write API and whatever network it is on."""
+
+    def test_loopback_needs_no_token_but_a_public_bind_mints_one(self):
+        local = settings_module.configure(vault=self.vault, host='127.0.0.1')
+        self.assertEqual(local.token, '')
+        public = settings_module.configure(vault=self.vault, host='0.0.0.0')
+        self.assertTrue(len(public.token) >= 16)
+        chosen = settings_module.configure(vault=self.vault, host='0.0.0.0', token='sesame')
+        self.assertEqual(chosen.token, 'sesame')
+
+    def test_loopback_addresses_are_recognised(self):
+        for host, expected in (('127.0.0.1', True), ('localhost', True), ('::1', True),
+                               ('0.0.0.0', False), ('192.168.1.5', False), ('', False)):
+            self.assertIs(settings_module.is_loopback(host), expected, host)
+
+
+class GatedServerTest(VaultTestCase):
+    TOKEN = 'test-token-value'
+
+    def setUp(self):
+        super().setUp()
+        self.settings = settings_module.configure(
+            vault=self.vault, host='127.0.0.1', port=0, token=self.TOKEN)
+        self.repo = ProjectRepository(settings=self.settings)
+        self.httpd = create_server(self.settings, self.repo)
+        self.base = 'http://127.0.0.1:%d' % self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=5)
+        super().tearDown()
+
+    def fetch(self, path, cookie=None, method='GET', body=None, redirect=True):
+        opener = urllib.request.build_opener()
+        if not redirect:
+            class NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, *args, **kwargs):
+                    return None
+            opener = urllib.request.build_opener(NoRedirect)
+        request = urllib.request.Request(self.base + path, data=body, method=method)
+        if cookie:
+            request.add_header('Cookie', cookie)
+        try:
+            with opener.open(request, timeout=5) as response:
+                return response.status, response.read(), dict(response.headers)
+        except urllib.error.HTTPError as error:
+            return error.code, error.read(), dict(error.headers)
+
+    def test_without_a_token_everything_is_refused(self):
+        for path, method in (('/', 'GET'), ('/api/health', 'GET'),
+                             ('/static/app.css', 'GET'),
+                             ('/api/project/project-8-banner-defaults/raw', 'GET')):
+            status, _, _ = self.fetch(path, method=method)
+            self.assertEqual(status, 401, path)
+
+    def test_writes_are_refused_too(self):
+        status, _, _ = self.fetch('/api/project/project-8-banner-defaults/attachments/x.txt',
+                                  method='PUT', body=b'data')
+        self.assertEqual(status, 401)
+        self.assertEqual(self.repo.list_attachments('project-8-banner-defaults'), [])
+
+    def test_the_token_in_the_url_hands_back_a_cookie_and_a_clean_redirect(self):
+        status, _, headers = self.fetch(f'/?k={self.TOKEN}&hide_past=1', redirect=False)
+        self.assertEqual(status, 302)
+        self.assertEqual(headers['Location'], '/?hide_past=1')
+        self.assertIn(f'{_TOKEN_COOKIE}={self.TOKEN}', headers['Set-Cookie'])
+        self.assertIn('HttpOnly', headers['Set-Cookie'])
+        self.assertIn('SameSite=Lax', headers['Set-Cookie'])
+        self.assertNotIn('Secure', headers['Set-Cookie'])   # plain HTTP here
+
+    def test_behind_an_https_proxy_the_cookie_is_marked_secure(self):
+        request = urllib.request.Request(self.base + f'/?k={self.TOKEN}')
+        request.add_header('X-Forwarded-Proto', 'https')
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args, **kwargs):
+                return None
+
+        try:
+            urllib.request.build_opener(NoRedirect).open(request, timeout=5)
+            self.fail('expected a redirect')
+        except urllib.error.HTTPError as error:
+            self.assertIn('Secure', dict(error.headers)['Set-Cookie'])
+
+    def test_the_cookie_opens_the_door(self):
+        status, body, _ = self.fetch('/', cookie=f'{_TOKEN_COOKIE}={self.TOKEN}')
+        self.assertEqual(status, 200)
+        self.assertIn(b'Delivery ASAP hub', body)
+
+    def test_a_wrong_token_is_refused_in_url_and_cookie(self):
+        self.assertEqual(self.fetch('/?k=nope', redirect=False)[0], 401)
+        self.assertEqual(self.fetch('/', cookie=f'{_TOKEN_COOKIE}=nope')[0], 401)
+
+    def test_api_refusals_speak_json(self):
+        status, body, _ = self.fetch('/api/health')
+        self.assertEqual(status, 401)
+        self.assertEqual(json.loads(body)['success'], False)
 
 
 class ServerTest(VaultTestCase):
@@ -428,9 +1000,10 @@ class ServerTest(VaultTestCase):
         self.assertIn('project-1-navigation-menu', body)
         self.assertIn("default-src 'self'", headers['Content-Security-Policy'])
 
-    def test_hide_past_query_switches_the_toggle(self):
+    def test_the_chart_opens_on_today_unless_the_url_says_otherwise(self):
+        self.assertIn('Show all dates', self.get('/')[1])
         self.assertIn('Show all dates', self.get('/?hide_past=1')[1])
-        self.assertIn('Show from today', self.get('/')[1])
+        self.assertIn('Show from today', self.get('/?hide_past=0')[1])
 
     def test_health_and_schema_endpoints(self):
         self.assertEqual(json.loads(self.get('/api/health')[1])['status'], 'ok')
@@ -442,7 +1015,19 @@ class ServerTest(VaultTestCase):
         payload = json.loads(self.get('/api/project/project-1-navigation-menu/raw')[1])
         self.assertEqual(payload['data']['id'], 'project-1-navigation-menu')
         self.assertIn('Phase 1', payload['body'])
-        self.assertTrue(payload['raw_text'].startswith('---'))
+        self.assertTrue(payload['raw_text'].startswith('# Navigation menu'))
+
+    def test_the_hierarchy_page_and_its_snapshot(self):
+        status, body, _ = self.get('/hierarchy')
+        self.assertEqual(status, 200)
+        self.assertIn('Structure', body)
+        self.assertIn('id="vault-markdown"', body)
+        self.assertIn('TIER 1 — CORE &amp; COMPLIANCE', body)
+
+        status, snapshot, headers = self.get('/api/vault/markdown')
+        self.assertEqual(status, 200)
+        self.assertIn('attachment; filename="vault-', headers['Content-Disposition'])
+        self.assertTrue(snapshot.startswith('# Navigation menu'))
 
     def test_static_assets_are_served_and_traversal_is_blocked(self):
         self.assertIn('Delivery ASAP hub', self.get('/static/app.css')[1])
@@ -464,6 +1049,50 @@ class ServerTest(VaultTestCase):
 
     def test_unknown_endpoint(self):
         self.assertEqual(self.post('/api/nope', {})[0], 404)
+
+    def send(self, method, path, body=None, content_type='application/octet-stream'):
+        request = urllib.request.Request(
+            self.base + path, data=body, method=method,
+            headers={'Content-Type': content_type} if body is not None else {})
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return response.status, response.read(), dict(response.headers)
+        except urllib.error.HTTPError as error:
+            return error.code, error.read(), dict(error.headers)
+
+    def test_attachment_round_trip_over_http(self):
+        url = '/api/project/project-8-banner-defaults/attachments/palette%20v2.png'
+        status, body, _ = self.send('PUT', url, b'\x89PNG fake', 'image/png')
+        self.assertEqual(status, 200, body)
+
+        status, body, headers = self.send('GET', url)
+        self.assertEqual((status, body), (200, b'\x89PNG fake'))
+        self.assertEqual(headers['Content-Type'], 'image/png')
+        self.assertTrue(headers['Content-Disposition'].startswith('inline;'))
+        self.assertIn("filename*=UTF-8''palette%20v2.png", headers['Content-Disposition'])
+
+        self.assertEqual(self.send('PUT', url, b'again', 'image/png')[0], 409)
+        self.assertEqual(self.send('DELETE', url)[0], 200)
+        self.assertEqual(self.send('GET', url)[0], 404)
+        self.assertEqual(self.send('DELETE', url)[0], 404)
+
+    def test_active_content_is_served_as_a_download(self):
+        for name in ('page.html', 'logo.svg'):
+            url = f'/api/project/project-8-banner-defaults/attachments/{name}'
+            self.assertEqual(self.send('PUT', url, b'<svg onload=alert(1)>')[0], 200)
+            _, _, headers = self.send('GET', url)
+            self.assertTrue(headers['Content-Disposition'].startswith('attachment;'), name)
+            self.assertEqual(headers['X-Content-Type-Options'], 'nosniff')
+
+    def test_attachment_upload_limits_and_traversal(self):
+        big = b'x' * (self.settings.max_upload_bytes + 1)
+        status, body, _ = self.send('PUT', '/api/project/project-8-banner-defaults/attachments/big.bin', big)
+        self.assertEqual(status, 413)
+        status, _, _ = self.send('PUT', '/api/project/project-8-banner-defaults/attachments/..%2F..%2Fcard.md', b'x')
+        self.assertIn(status, (400, 404))
+        self.assertFalse(os.path.exists(os.path.join(self.vault, 'card.md')))
+        status, _, _ = self.send('PUT', '/api/project/ghost/attachments/a.txt', b'x')
+        self.assertEqual(status, 404)
 
 
 if __name__ == '__main__':

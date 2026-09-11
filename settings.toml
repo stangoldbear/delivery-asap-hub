@@ -3,8 +3,9 @@
 #
 # Everything an organisation needs to change lives here: no Python edit needed
 # to add a tier, a role, a team member or a project code.
-# Copy to settings.local.toml (git-ignored) to override without touching this
-# file, or pass --settings PATH.
+# A settings.local.toml next to this file (git-ignored) is layered on top of it:
+# it only needs the handful of keys that differ. Tables merge, lists replace.
+# `--settings PATH` bypasses both and reads that file alone.
 # ─────────────────────────────────────────────────────────────────────────────
 
 [app]
@@ -16,12 +17,15 @@ footer   = "Delivery ASAP hub — local second brain"
 [server]
 host = "127.0.0.1"               # loopback by default; the write API is unauthenticated
 port = 8080
+max_upload_mb = 25               # cap for a single attachment upload
+# Shared secret demanded of every request when `host` is not loopback. Left
+# empty, one is generated at startup and printed with the URL to open.
+token = ""
 
 [vault]
 # Paths are resolved relative to the repository root unless absolute.
 root     = ".knowledge"
 projects = "02-projects/active"
-plan     = "03-delivery-patterns/delivery-plan.md"
 
 [links]
 jira_base_url          = "https://jira.example.com/browse/"
@@ -43,12 +47,10 @@ month_abbr = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
 tier = "tier-3"                  # used when a card declares an unknown tier
 # Platforms offered as toggles in the detail panel.
 platforms = ["iOS", "Android", "Backend (dev)", "Backend (config)", "Content", "QA"]
-# Colour for timeline rows that match no role, and for time-off ("done") tasks.
+# Colour for timeline rows whose `who` matches no one in the roster below.
 fallback_role  = { label = "Member", color = "#78909c" }
-time_off_color = "#ef5350"
 
 # ─── Tiers: rendering order = declaration order ──────────────────────────────
-# The last entry is the bucket for timeline tasks not linked to any project.
 [[tiers]]
 key   = "tier-1"
 title = "TIER 1 — CORE & COMPLIANCE (HIGH PRIORITY)"
@@ -63,11 +65,6 @@ rgb   = [245, 124, 0]
 key   = "tier-3"
 title = "TIER 3 — SUPPORT & MINOR"
 rgb   = [67, 160, 71]
-
-[[tiers]]
-key   = "other"
-title = "OPERATIONAL & TEAM TIME OFF"
-rgb   = [97, 97, 97]
 
 # ─── Roles ───────────────────────────────────────────────────────────────────
 # `squads` below assigns a role explicitly per member; `roles` is only the
@@ -108,8 +105,10 @@ label    = "PM / DM"
 color    = "#78909c"
 keywords = ["PM", "Delivery Manager"]
 
-# ─── Squads: timeline label prefix → person, with an explicit role ───────────
-# The `section` key must match the `section` line of the Gantt plan.
+# ─── Squads: the roster a card's `who` is resolved against ──────────────────
+# A task names a person: `- who: Ada Lovelace`. The `prefix` is matched too,
+# so a card written when the timeline lived in a plan file still resolves.
+# `section` only groups the roster; nothing reads it.
 [[squads]]
 section = "Backend"
 members = [
@@ -144,18 +143,3 @@ members = [
   { prefix = "PM #1",            name = "Mary Jackson",      role = "pm" },
   { prefix = "Delivery Manager", name = "Unassigned",        role = "pm" },
 ]
-
-# ─── Short code used in the Gantt plan → project card id ─────────────────────
-[project_codes]
-P1  = "project-1-navigation-menu"
-P2  = "project-2-eco-labels"
-P3  = "project-3-home-redesign"
-P4  = "project-4-analytics-migration"
-P5  = "project-5-carrier-tracking"
-P6  = "project-6-designer-name"
-P7  = "project-7-menu-endpoint"
-P8  = "project-8-banner-defaults"
-P9  = "project-9-store-credit"
-P10 = "project-10-delivery-estimate"
-P11 = "project-11-checkout-hardening"
-P12 = "project-12-accessibility-audit"

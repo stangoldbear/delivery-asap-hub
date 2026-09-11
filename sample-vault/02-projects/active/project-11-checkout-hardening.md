@@ -1,28 +1,34 @@
----
-id: "project-11-checkout-hardening"
-type: "project"
-name: "Checkout hardening"
-tier: "tier-9"
-priority: "abc"
-status: "on-hold"
-intro: "Deliberately malformed card: unknown tier, unknown status, non-numeric priority."
-dates:
-  target_delivery: "2026-10-15"
-  deadline_text: "2026-10-15"
-  deadline_type: "whenever"
-tech_footprint:
-  platforms:
-    - "Backend (dev)"
-  qa_effort: "medium"
-  content_impact: false
-jira:
-  request: "NIMBUS-1300"
-todos:
-  - id: "todo-project-11-checkout-hardening-1-1788000060"
-    text: "Fix the tier and status of this card from the Advanced Edit form"
-    deadline: ""
-    done: false
----
+# Checkout hardening
+- id: project-11-checkout-hardening
+- type: project
+- tier: tier-9
+- priority: 10
+- status: on-hold
+- intro: Deliberately malformed card: unknown tier, unknown status, non-numeric priority.
+- timeline
+  - start: 2026-09-28
+  - end: 2026-10-14
+  - tasks
+    - task-1
+      - who: Grace Hopper
+      - start: 2026-09-28
+      - end: 2026-10-14
+      - note: checkout hardening
+- dates
+  - target_delivery: 2026-10-15
+  - deadline_text: 2026-10-15
+  - deadline_type: whenever
+- tech_footprint
+  - platforms
+    - Backend (dev)
+  - qa_effort: medium
+  - content_impact: false
+- jira
+  - request: NIMBUS-1300
+- todos
+  - todo-project-11-checkout-hardening-1-1788000060
+    - text: Fix the tier and status of this card from the Advanced Edit form
+    - deadline:
 
 ## Notes
 

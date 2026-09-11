@@ -11,7 +11,9 @@ simplification for a single-tenant local tool — tests call `configure()` with
 their own fixture path.
 """
 
+import ipaddress
 import os
+import secrets
 import tomllib
 from dataclasses import dataclass
 from datetime import date
@@ -23,17 +25,25 @@ DEFAULT_SETTINGS_PATH = os.path.join(BASE_DIR, 'settings.toml')
 LOCAL_SETTINGS_PATH = os.path.join(BASE_DIR, 'settings.local.toml')
 
 # ─── Presentation constants (not deployment-specific: kept in code) ──────────
-TIER_ROW_ALPHA = 0.15
-RESOURCE_ROW_ALPHA = 0.05
 BLOCKED_COLOR = '#e74c3c'
 
 STATUS_STYLES = {
     'active':   {'bg': '#e8f5e9', 'fg': '#2e7d32'},
     'blocked':  {'bg': '#ffebee', 'fg': '#b71c1c'},
     'inactive': {'bg': '#eceff1', 'fg': '#546e7a'},
+    'done':     {'bg': '#e0f2f1', 'fg': '#00695c'},
+    'dropped':  {'bg': '#f3f3f4', 'fg': '#6b7280'},
 }
 STATUS_FALLBACK = {'bg': '#f5f5f5', 'fg': '#555555'}
 STATUS_OPTIONS = list(STATUS_STYLES)
+
+# Two display groups, drawn under the tiers. They are not tiers: a project
+# lands in one because of its status, and keeps the tier it belongs to.
+DONE_GROUP, DROPPED_GROUP = 'done', 'dropped'
+DISPLAY_GROUPS = {
+    DONE_GROUP:    {'title': 'DONE', 'rgb': (0, 105, 92)},
+    DROPPED_GROUP: {'title': 'DROPPED', 'rgb': (107, 114, 128)},
+}
 
 DEADLINE_STYLES = {
     'hard': {'bg': '#ffebee', 'fg': '#c62828'},
@@ -42,6 +52,13 @@ DEADLINE_STYLES = {
 DEADLINE_OPTIONS = [('soft', 'Soft target'), ('hard', 'Hard deadline')]
 
 SEVERITY_OPTIONS = ['high', 'medium', 'low']
+
+# Attachment types the browser may render inline. Anything else is served as a
+# download: an uploaded HTML or SVG file rendered same-origin would run script.
+INLINE_ATTACHMENT_TYPES = frozenset({
+    'application/pdf', 'image/png', 'image/jpeg', 'image/gif', 'image/webp',
+    'text/plain', 'text/markdown',
+})
 QA_EFFORT_OPTIONS = ['low', 'medium', 'high']
 
 # Gantt layout metrics. Emitted as CSS custom properties by the view so that
@@ -50,7 +67,7 @@ COL_W = 17           # day column width in px
 LABEL_W = 340        # sticky left column, initial width
 LABEL_W_MIN = 160    # drag limits for the sticky column
 LABEL_W_MAX = 900
-ROW_H = 62           # project row (three-line layout)
+ROW_H = 34           # project row (one line: identity, signals, actions)
 SUB_ROW_H = 20       # resource row
 
 
@@ -66,9 +83,10 @@ class Settings:
     footer: str
     host: str
     port: int
+    token: str
     vault_root: str
     projects_dir: str
-    plan_path: str
+    max_upload_bytes: int
     jira_base_url: str
     jira_placeholder: str
     confluence_placeholder: str
@@ -78,17 +96,15 @@ class Settings:
     month_abbr: tuple
     tiers: dict            # key -> {'title': str, 'rgb': (r, g, b)}
     default_tier: str
-    other_tier: str        # last declared tier: bucket for project-less tasks
     platforms: tuple
     roles: tuple           # ({'key','label','color','keywords'}, ...)
     fallback_role: dict
-    time_off_color: str
     squads: dict           # section -> ({'prefix','name','role'}, ...)
-    project_codes: dict    # short code -> project id
 
     @property
-    def project_tiers(self):
-        return [key for key in self.tiers if key != self.other_tier]
+    def attachments_dir(self):
+        """Attachments live next to the cards: <projects>/attachments/<project-id>/."""
+        return os.path.join(self.projects_dir, 'attachments')
 
     def role(self, key):
         for entry in self.roles:
@@ -113,11 +129,6 @@ def hex_color(rgb):
     return '#%02x%02x%02x' % tuple(rgb)
 
 
-def rgba(rgb, alpha):
-    r, g, b = rgb
-    return f'rgba({r}, {g}, {b}, {alpha})'
-
-
 # ─── Parsing ─────────────────────────────────────────────────────────────────
 def _require(mapping, key, where):
     if key not in mapping:
@@ -127,6 +138,16 @@ def _require(mapping, key, where):
 
 def _resolve(path, root=BASE_DIR):
     return path if os.path.isabs(path) else os.path.normpath(os.path.join(root, path))
+
+
+def is_loopback(host):
+    """True when a bind address can only be reached from this machine."""
+    if host in ('localhost', ''):
+        return host == 'localhost'
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _parse(raw, source):
@@ -202,9 +223,10 @@ def _parse(raw, source):
         footer=app.get('footer', ''),
         host=server.get('host', '127.0.0.1'),
         port=int(server.get('port', 8080)),
+        token=str(server.get('token', '') or ''),
+        max_upload_bytes=int(float(server.get('max_upload_mb', 25)) * 1024 * 1024),
         vault_root=vault_root,
         projects_dir=_resolve(vault.get('projects', '02-projects/active'), vault_root),
-        plan_path=_resolve(vault.get('plan', '03-delivery-patterns/delivery-plan.md'), vault_root),
         jira_base_url=links.get('jira_base_url', ''),
         jira_placeholder=links.get('jira_placeholder', ''),
         confluence_placeholder=links.get('confluence_placeholder', ''),
@@ -214,28 +236,57 @@ def _parse(raw, source):
         month_abbr=month_abbr,
         tiers=tiers,
         default_tier=default_tier,
-        other_tier=list(tiers)[-1],
         platforms=tuple(defaults.get('platforms', ())),
         roles=roles,
         fallback_role=dict(defaults.get('fallback_role', {'label': 'Member', 'color': '#78909c'})),
-        time_off_color=defaults.get('time_off_color', '#ef5350'),
         squads=squads,
-        project_codes=dict(raw.get('project_codes', {})),
     )
 
 
-def load(path=None):
-    """Read and validate a settings file. Raises SettingsError, never guesses."""
-    if path is None:
-        path = LOCAL_SETTINGS_PATH if os.path.isfile(LOCAL_SETTINGS_PATH) else DEFAULT_SETTINGS_PATH
+def _read_toml(path):
     try:
         with open(path, 'rb') as handle:
-            raw = tomllib.load(handle)
+            return tomllib.load(handle)
     except FileNotFoundError:
         raise SettingsError(f'Settings file not found: {path}')
     except tomllib.TOMLDecodeError as exc:
         raise SettingsError(f'{path}: invalid TOML — {exc}')
-    return _parse(raw, os.path.basename(path))
+
+
+def _overlay(base, override):
+    """
+    Merge one settings mapping over another, table by table.
+
+    Only tables merge. A list — the tiers, the roles, the squads — is replaced
+    whole: half of one roster grafted onto half of another is nobody's idea of
+    an override.
+    """
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _overlay(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def load(path=None):
+    """
+    Read and validate the settings. Raises SettingsError, never guesses.
+
+    With no path given, `settings.local.toml` is layered over `settings.toml`
+    rather than replacing it, so a local file can carry the two lines that
+    actually differ.
+    """
+    if path is not None:
+        return _parse(_read_toml(path), os.path.basename(path))
+
+    raw = _read_toml(DEFAULT_SETTINGS_PATH)
+    source = os.path.basename(DEFAULT_SETTINGS_PATH)
+    if os.path.isfile(LOCAL_SETTINGS_PATH):
+        raw = _overlay(raw, _read_toml(LOCAL_SETTINGS_PATH))
+        source = os.path.basename(LOCAL_SETTINGS_PATH)
+    return _parse(raw, source)
 
 
 def _rebase(path, old_root, new_root):
@@ -252,8 +303,8 @@ def _rebase(path, old_root, new_root):
 _current = None
 
 
-def configure(path=None, *, vault=None, projects_dir=None, plan_path=None,
-              host=None, port=None):
+def configure(path=None, *, vault=None, projects_dir=None,
+              host=None, port=None, token=None):
     """Load settings once, applying command-line overrides. Returns the value."""
     global _current
     settings = load(path)
@@ -262,17 +313,22 @@ def configure(path=None, *, vault=None, projects_dir=None, plan_path=None,
         root = _resolve(vault, os.getcwd())
         overrides['vault_root'] = root
         overrides['projects_dir'] = _rebase(settings.projects_dir, settings.vault_root, root)
-        overrides['plan_path'] = _rebase(settings.plan_path, settings.vault_root, root)
     if projects_dir:
         overrides['projects_dir'] = _resolve(projects_dir, os.getcwd())
-    if plan_path:
-        overrides['plan_path'] = _resolve(plan_path, os.getcwd())
     if host:
         overrides['host'] = host
     if port is not None:
         overrides['port'] = int(port)
+    if token is not None:
+        overrides['token'] = str(token)
     if overrides:
         settings = Settings(**{**settings.__dict__, **overrides})
+
+    # Reachable from another machine and no shared secret: mint one rather than
+    # serve an unauthenticated write API to whatever network this is on.
+    if not is_loopback(settings.host) and not settings.token:
+        settings = Settings(**{**settings.__dict__, 'token': secrets.token_urlsafe(16)})
+
     _current = settings
     return settings
 

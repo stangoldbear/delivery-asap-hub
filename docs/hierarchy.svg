@@ -38,8 +38,8 @@
   <text class="s" x="602" y="129">QA</text>
   <rect x="634" y="120" width="14" height="10" fill="#ab47bc" rx="2"/>
   <text class="s" x="656" y="129">content</text>
-  <rect x="520" y="146" width="14" height="10" fill="#ef5350" rx="2"/>
-  <text class="s" x="542" y="155">time off</text>
+  <path d="M527 146 L534 152 L527 158 L520 152 Z" fill="#1d1d1f"/>
+  <text class="s" x="542" y="155">milestone</text>
   <rect x="580" y="146" width="14" height="10" fill="#78909c" rx="2"/>
   <text class="s" x="602" y="155">PM / DM</text>
 </svg>

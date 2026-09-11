@@ -15,8 +15,10 @@
 
   var STATE_KEY = 'dah_ui_state';
   var LABEL_W_KEY = 'dah_label_width';
-  var CARET_OPEN = '▼';   // ▼
-  var CARET_CLOSED = '►'; // ►
+  var HIDE_PAST_KEY = 'dah_hide_past';
+  var PREFS_KEY = 'dah_prefs';
+  var CARET_OPEN = '▲';
+  var CARET_CLOSED = '►';
 
   /* ─── Toast: make errors visible instead of failing silently ───────────── */
   var Toast = {
@@ -36,7 +38,8 @@
       this.host().appendChild(node);
       setTimeout(function () { node.remove(); }, 6000);
     },
-    error: function (message) { this.show(message, 'error'); }
+    error: function (message) { this.show(message, 'error'); },
+    success: function (message) { this.show(message, 'info'); }
   };
 
   window.addEventListener('error', function (event) {
@@ -51,7 +54,7 @@
     if (button) button.textContent = open ? CARET_OPEN : CARET_CLOSED;
   }
 
-  function tierRows(tier) { return all('[data-tier-child="' + tier + '"]'); }
+  function groupRows(group) { return all('[data-group-child="' + group + '"]'); }
   function projectRows(pid) { return all('[data-proj-child="' + pid + '"]'); }
   function detailRow(pid) { return byId('detail-panel-' + pid); }
 
@@ -61,21 +64,113 @@
     return isNaN(value) ? fallback : value;
   }
 
+  /* ─── Preferences ───────────────────────────────────────────────────────────
+     Per browser, like the collapse state and the column width: these are not
+     deployment settings, they are how this person likes to be asked. */
+  var Prefs = {
+    values: { save: true, cancel: true },
+
+    load: function () {
+      try {
+        var stored = JSON.parse(localStorage.getItem(PREFS_KEY) || 'null');
+        if (stored) {
+          if (typeof stored.save === 'boolean') this.values.save = stored.save;
+          if (typeof stored.cancel === 'boolean') this.values.cancel = stored.cancel;
+        }
+      } catch (err) { /* defaults */ }
+      all('[data-pref]').forEach(function (box) {
+        box.checked = Prefs.values[box.dataset.pref] !== false;
+      });
+    },
+
+    set: function (name, value) {
+      this.values[name] = value;
+      try { localStorage.setItem(PREFS_KEY, JSON.stringify(this.values)); } catch (err) { /* noop */ }
+    }
+  };
+
+  /* ─── Dialog ────────────────────────────────────────────────────────────────
+     One confirmation surface for the whole app. Delete always goes through it;
+     save and cancel go through it only while the footer says so. */
+  var Dialog = {
+    open: null,
+
+    confirm: function (options) {
+      var self = this;
+      return new Promise(function (resolve) {
+        var overlay = document.createElement('div');
+        overlay.className = 'dialog-overlay';
+
+        var box = document.createElement('div');
+        box.className = 'dialog';
+        box.setAttribute('role', 'dialog');
+        box.setAttribute('aria-modal', 'true');
+
+        var title = document.createElement('h3');
+        title.className = 'dialog__title';
+        title.textContent = options.title;
+
+        var body = document.createElement('p');
+        body.className = 'dialog__body';
+        body.textContent = options.body || '';
+
+        var actions = document.createElement('div');
+        actions.className = 'dialog__actions';
+
+        var cancel = document.createElement('button');
+        cancel.type = 'button';
+        cancel.className = 'btn btn--secondary btn--sm';
+        cancel.textContent = options.cancelLabel || 'Back';
+
+        var accept = document.createElement('button');
+        accept.type = 'button';
+        accept.className = 'btn btn--sm ' +
+          (options.destructive ? 'btn--destructive' : 'btn--default');
+        accept.textContent = options.confirmLabel || 'Confirm';
+
+        function close(result) {
+          overlay.remove();
+          self.open = null;
+          resolve(result);
+        }
+
+        cancel.addEventListener('click', function () { close(false); });
+        accept.addEventListener('click', function () { close(true); });
+        overlay.addEventListener('mousedown', function (event) {
+          if (event.target === overlay) close(false);
+        });
+
+        actions.append(cancel, accept);
+        box.append(title, body, actions);
+        overlay.appendChild(box);
+        document.body.appendChild(overlay);
+        self.open = close;
+        accept.focus();
+      });
+    }
+  };
+
+  /* Ask, or don't, depending on the footer. `kind` is 'save' or 'cancel'. */
+  function guard(kind, options, run) {
+    if (Prefs.values[kind] === false) return run();
+    Dialog.confirm(options).then(function (confirmed) { if (confirmed) run(); });
+  }
+
   /* ─── UI state persistence ──────────────────────────────────────────────── */
   var UIState = {
     save: function () {
       try {
         var state = {
           globalTodosCollapsed: isHidden(byId('global-todos-content')),
-          collapsedTiers: [],
+          collapsedGroups: [],
           collapsedProjects: [],
           openDetailPanels: [],
           openHistories: []
         };
 
         all('.tier-row').forEach(function (row) {
-          var tier = row.dataset.tier;
-          if (tier && tierRows(tier).some(isHidden)) state.collapsedTiers.push(tier);
+          var group = row.dataset.group;
+          if (group && groupRows(group).some(isHidden)) state.collapsedGroups.push(group);
         });
 
         all('.project-main-row').forEach(function (row) {
@@ -108,7 +203,7 @@
       if (!state) return;
 
       if (state.globalTodosCollapsed) setGlobalTodos(false, false);
-      (state.collapsedTiers || []).forEach(function (tier) { setTier(tier, false, false); });
+      (state.collapsedGroups || []).forEach(function (group) { setGroup(group, false, false); });
       (state.collapsedProjects || []).forEach(function (pid) { setProject(pid, false, false); });
       (state.openDetailPanels || []).forEach(function (pid) { setDetail(pid, true, false); });
       (state.openHistories || []).forEach(function (pid) { setHistory(pid, true, false); });
@@ -124,24 +219,22 @@
     if (persist !== false) UIState.save();
   }
 
-  function setTier(tier, open, persist) {
-    tierRows(tier).forEach(function (row) { row.style.display = open ? '' : 'none'; });
-    setCaret(byId('btn-tier-' + tier), open);
+  function setGroup(group, open, persist) {
+    groupRows(group).forEach(function (row) { row.style.display = open ? '' : 'none'; });
+    setCaret(byId('btn-group-' + group), open);
     if (!open) {
-      all('[data-detail-tier="' + tier + '"]').forEach(function (row) {
+      all('[data-detail-group="' + group + '"]').forEach(function (row) {
         row.style.display = 'none';
       });
     }
     if (persist !== false) UIState.save();
   }
 
+  /* Collapsing a project folds away its people. The project row stays, and so
+     does its panel: closing a panel is what the Close button is for. */
   function setProject(pid, open, persist) {
     projectRows(pid).forEach(function (row) { row.style.display = open ? '' : 'none'; });
     setCaret(byId('btn-toggle-proj-' + pid), open);
-    if (!open) {
-      var panel = detailRow(pid);
-      if (panel) panel.style.display = 'none';
-    }
     if (persist !== false) UIState.save();
   }
 
@@ -156,7 +249,7 @@
       var row = document.querySelector('.project-main-row[data-proj-id="' + pid + '"]');
       if (row && isHidden(row)) {
         row.style.display = '';
-        setCaret(byId('btn-tier-' + row.dataset.tierChild), true);
+        setCaret(byId('btn-group-' + row.dataset.groupChild), true);
       }
       panel.style.display = 'table-row';
     } else {
@@ -172,18 +265,18 @@
     box.style.display = open ? 'flex' : 'none';
     if (button) {
       var count = box.querySelectorAll('.todo-item-row').length;
-      button.textContent = '📜 Completed actions (' + count + ') ' +
+      button.textContent = 'Completed actions (' + count + ') ' +
         (open ? CARET_OPEN : CARET_CLOSED);
     }
     if (persist !== false) UIState.save();
   }
 
   /* ─── API client ────────────────────────────────────────────────────────── */
-  function post(path, payload) {
+  function request(method, path, body, contentType) {
     return fetch(path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload || {})
+      method: method,
+      headers: { 'Content-Type': contentType },
+      body: body
     }).then(function (response) {
       return response.json().catch(function () {
         throw new Error('HTTP ' + response.status);
@@ -199,41 +292,230 @@
     });
   }
 
+  function post(path, payload) {
+    return request('POST', path, JSON.stringify(payload || {}), 'application/json');
+  }
+
   function projectApi(pid, action, payload) {
     return post('/api/project/' + encodeURIComponent(pid) + '/' + action, payload);
+  }
+
+  function attachmentUrl(pid, name) {
+    return '/api/project/' + encodeURIComponent(pid) + '/attachments/' + encodeURIComponent(name);
+  }
+
+  /* The body IS the file: no multipart encoding on either side. */
+  function uploadAttachment(pid, file) {
+    return request('PUT', attachmentUrl(pid, file.name), file,
+      file.type || 'application/octet-stream');
   }
 
   function reloadOnSuccess(promise) {
     promise.then(function () { location.reload(); }).catch(function () { /* reported */ });
   }
 
-  function values(selector) {
-    return all(selector)
-      .map(function (input) { return input.value.trim(); })
-      .filter(function (value) { return value !== ''; });
+  /* ─── Field editors ─────────────────────────────────────────────────────────
+     Every value in the panel renders read-only and becomes a form on double
+     click; both halves come from the server, so nothing here restates what a
+     field looks like. A save sends only the parameters of that one field. */
+  function within(node, selector) {
+    return Array.prototype.slice.call(node.querySelectorAll(selector));
   }
 
-  function saveProjectFields(pid) {
-    var status = byId('status-sel-' + pid);
-    var reason = byId('blocked-reason-' + pid);
-    var deadline = byId('deadline-text-' + pid);
-    var deadlineType = byId('deadline-type-' + pid);
-    var jira = byId('jira-req-' + pid);
-    var statusValue = status ? status.value : 'active';
+  function fieldInputs(field) { return within(field, '[data-param]'); }
 
-    var wrap = byId('blocked-reason-wrap-' + pid);
-    if (wrap) wrap.style.display = statusValue === 'blocked' ? 'block' : 'none';
-
-    return projectApi(pid, 'update', {
-      status: statusValue,
-      blocked_reason: reason ? reason.value : '',
-      deadline_text: deadline ? deadline.value : '',
-      deadline_type: deadlineType ? deadlineType.value : 'soft',
-      jira_request: jira ? jira.value : '',
-      jira_epics: values('.jira-epic-field-' + pid),
-      confluence_links: values('.confluence-field-' + pid),
-      figma_links: values('.figma-field-' + pid)
+  function collectField(field) {
+    var payload = {};
+    fieldInputs(field).forEach(function (input) {
+      var param = input.dataset.param;
+      if (input.dataset.kind === 'list') {
+        if (!payload[param]) payload[param] = [];
+        if (input.value.trim()) payload[param].push(input.value.trim());
+      } else {
+        payload[param] = input.value;
+      }
     });
+    return payload;
+  }
+
+  function projectOf(node) {
+    var row = node.closest('.detail-row');
+    return row ? row.dataset.projId : null;
+  }
+
+  function openField(field) {
+    if (field.dataset.editing === '1') return;
+    field.dataset.editing = '1';
+    field.querySelector('.editable-view').hidden = true;
+    var form = field.querySelector('.editable-form');
+    form.hidden = false;
+    var first = form.querySelector('input, select, textarea');
+    if (first) first.focus();
+  }
+
+  function closeField(field) {
+    field.querySelector('.editable-view').hidden = false;
+    field.querySelector('.editable-form').hidden = true;
+    delete field.dataset.editing;
+  }
+
+  /* Cancel puts every control back to the value the server rendered, list rows
+     included: a row added and not saved leaves nothing behind, and a row
+     removed and not saved comes back. */
+  function resetField(field) {
+    within(field, '.link-row[data-added="1"]').forEach(function (row) { row.remove(); });
+    within(field, '.link-row[hidden]').forEach(function (row) { row.hidden = false; });
+    fieldInputs(field).forEach(function (input) {
+      input.value = input.dataset.kind === 'list'
+        ? input.defaultValue
+        : (input.dataset.value || '');
+    });
+    closeField(field);
+  }
+
+  var STATUS_STYLES = {};
+  var DEADLINE_STYLES = {};
+
+  function paintPill(node, styles, value) {
+    var style = styles[value] || { bg: '', fg: '' };
+    node.style.background = style.bg;
+    node.style.color = style.fg;
+  }
+
+  /* The read-only half is refreshed from the controls that were just saved:
+     `data-from` names the parameter, `data-format` how to spell it. */
+  function refreshFieldView(field, payload) {
+    within(field, '[data-from]').forEach(function (node) {
+      var param = node.dataset.from;
+      if (!(param in payload)) return;
+      var value = String(payload[param] || '');
+
+      if (node.dataset.format === 'date') node.textContent = formatDateLong(value) || 'Not set';
+      else if (node.dataset.format === 'status') {
+        node.textContent = value.toUpperCase();
+        paintPill(node, STATUS_STYLES, value);
+      } else if (node.dataset.format === 'deadline') {
+        node.textContent = value.toUpperCase();
+        paintPill(node, DEADLINE_STYLES, value);
+      } else {
+        node.textContent = value || node.dataset.empty || '';
+      }
+
+      var anchor = node.parentNode.querySelector('a.jira-link');
+      if (node.dataset.linkBase !== undefined && anchor) {
+        anchor.href = value ? node.dataset.linkBase + value : '#';
+        anchor.hidden = !value;
+      }
+    });
+
+    within(field, '[data-list]').forEach(function (box) {
+      var list = payload[box.dataset.list];
+      if (!list) return;
+      box.replaceChildren();
+      if (!list.length) {
+        var empty = document.createElement('span');
+        empty.className = 'editable-empty';
+        empty.textContent = 'None';
+        box.appendChild(empty);
+      }
+      list.forEach(function (value) { box.appendChild(buildChip(box, value)); });
+      var count = field.querySelector('[data-count="' + box.dataset.list + '"]');
+      if (count) count.textContent = list.length;
+    });
+  }
+
+  /* A chip borrows its icon from one the server already rendered, so the SVG
+     lives in exactly one place. */
+  function buildChip(box, value) {
+    var base = box.dataset.baseUrl || '';
+    var href = base + value;
+    var isLink = /^https?:\/\//.test(href) || (href && href.indexOf('://') === -1);
+    if (!isLink) {
+      var plain = document.createElement('span');
+      plain.className = 'badge badge--outline';
+      plain.textContent = value;
+      return plain;
+    }
+    var chip = document.createElement('a');
+    chip.className = box.dataset.linkClass || 'jira-link';
+    chip.href = href;
+    chip.target = '_blank';
+    chip.rel = 'noopener noreferrer';
+    var template = document.querySelector('.jira-link .icon');
+    if (template) chip.appendChild(template.cloneNode(true));
+    chip.appendChild(document.createTextNode(value));
+    return chip;
+  }
+
+  function saveField(field) {
+    var pid = projectOf(field);
+    var payload = collectField(field);
+    if (!pid) return;
+
+    guard('save', SAVE_FIELD, function () {
+      projectApi(pid, 'update', payload).then(function () {
+        refreshFieldView(field, payload);
+        fieldInputs(field).forEach(function (input) {
+          if (input.dataset.kind !== 'list') input.dataset.value = input.value;
+        });
+        closeField(field);
+        if ('status' in payload) {
+          var wrap = byId('blocked-reason-wrap-' + pid);
+          if (wrap) wrap.style.display = payload.status === 'blocked' ? '' : 'none';
+          // Finishing or dropping a project moves it to another band of the
+          // chart, which is more than a pill can be patched into.
+          if (movesGroup(pid, payload.status)) return location.reload();
+          refreshProjectRow(pid, payload);
+        }
+        if ('deadline_text' in payload) refreshProjectRow(pid, payload);
+        if ('name' in payload) renameProject(pid, payload.name);
+        Toast.success('Saved.');
+      }).catch(function () { /* reported */ });
+    });
+  }
+
+  var GROUP_STATES = ['done', 'dropped'];
+
+  function movesGroup(pid, status) {
+    var row = document.querySelector('.project-main-row[data-proj-id="' + CSS.escape(pid) + '"]');
+    var current = row ? (row.querySelector('.status-pill') || {}).textContent : '';
+    return GROUP_STATES.indexOf(status) !== -1 ||
+      GROUP_STATES.indexOf(String(current || '').toLowerCase()) !== -1;
+  }
+
+  /* The name is in four places at once: the chart row, the panel heading, the
+     aggregated card, and the title of the card on disk. */
+  function renameProject(pid, name) {
+    var row = document.querySelector('.project-main-row[data-proj-id="' + CSS.escape(pid) + '"]');
+    var title = row && row.querySelector('.project-title');
+    if (title) title.textContent = name;
+
+    var panel = detailRow(pid);
+    var heading = panel && panel.querySelector('.detail-header h4');
+    if (heading) heading.textContent = 'Notes & actions — ' + name;
+
+    var head = document.querySelector('[data-card="' + CSS.escape(pid) + '"]');
+    var card = head && head.querySelector('.global-todo-card__title');
+    if (card) card.textContent = name;
+  }
+
+  /* The chart row shows the same two signals as the panel: they change together
+     or they disagree until the next reload. */
+  function refreshProjectRow(pid, payload) {
+    var row = document.querySelector('.project-main-row[data-proj-id="' + CSS.escape(pid) + '"]');
+    if (!row) return;
+    var status = row.querySelector('.status-pill');
+    if (status && payload.status) {
+      status.textContent = payload.status.toUpperCase();
+      paintPill(status, STATUS_STYLES, payload.status);
+    }
+    var deadline = row.querySelector('.deadline-pill');
+    if (deadline && ('deadline_text' in payload)) {
+      var type = payload.deadline_type || '';
+      deadline.textContent = (formatDateLong(payload.deadline_text) || payload.deadline_text) +
+        (type ? ' [' + type.toUpperCase() + ']' : '');
+      paintPill(deadline, DEADLINE_STYLES, type);
+    }
   }
 
   /* ─── Inline note editor (built through the DOM, never through strings) ─── */
@@ -260,16 +542,16 @@
 
     var save = document.createElement('button');
     save.type = 'button';
-    save.className = 'action-btn';
-    save.textContent = '💾 Save';
+    save.className = 'btn btn--default btn--sm';
+    save.textContent = 'Save';
     save.dataset.action = 'todo-save';
     save.dataset.project = pid;
     save.dataset.todo = todoId;
 
     var cancel = document.createElement('button');
     cancel.type = 'button';
-    cancel.className = 'close-panel-btn';
-    cancel.textContent = '✕';
+    cancel.className = 'btn btn--secondary btn--sm';
+    cancel.textContent = 'Cancel';
     cancel.dataset.action = 'todo-cancel';
     cancel.dataset.project = pid;
     cancel.dataset.todo = todoId;
@@ -306,16 +588,23 @@
 
     var text = row.querySelector('.todo-edit-text').value.trim();
     var deadlineInput = row.querySelector('.todo-edit-dl');
+    var deadline = deadlineInput ? deadlineInput.value : '';
     if (!text) {
       Toast.error('The note text cannot be empty.');
       return;
     }
 
-    reloadOnSuccess(projectApi(pid, 'todo/update', {
-      todo_id: todoId,
-      text: text,
-      deadline: deadlineInput ? deadlineInput.value : ''
-    }));
+    guard('save', {
+      title: 'Save this note?',
+      body: 'The card is rewritten on disk.',
+      confirmLabel: 'Save'
+    }, function () {
+      projectApi(pid, 'todo/update', { todo_id: todoId, text: text, deadline: deadline })
+        .then(function (result) {
+          TodoPatch.update(pid, todoId, text, deadline, result.html);
+          Toast.success('Note saved.');
+        }).catch(function () { /* reported */ });
+    });
   }
 
   /* ─── Inline "intro" editor (free-form project information) ─────────────── */
@@ -335,14 +624,14 @@
 
     var save = document.createElement('button');
     save.type = 'button';
-    save.className = 'action-btn';
-    save.textContent = '💾 Save';
+    save.className = 'btn btn--default btn--sm';
+    save.textContent = 'Save';
     save.dataset.action = 'intro-save';
     save.dataset.project = pid;
 
     var cancel = document.createElement('button');
     cancel.type = 'button';
-    cancel.className = 'close-panel-btn';
+    cancel.className = 'btn btn--secondary btn--sm';
     cancel.textContent = 'Cancel';
     cancel.dataset.action = 'intro-cancel';
     cancel.dataset.project = pid;
@@ -365,11 +654,35 @@
     if (!box) return;
     var textarea = box.querySelector('.intro-edit-textarea');
     if (!textarea) return;
-    reloadOnSuccess(projectApi(pid, 'update', { intro: textarea.value }));
+    var value = textarea.value;
+
+    guard('save', {
+      title: 'Save the project information?',
+      body: 'The card is rewritten on disk.',
+      confirmLabel: 'Save'
+    }, function () {
+      projectApi(pid, 'update', { intro: value }).then(function (result) {
+        box.dataset.text = value;
+        box.__snapshot = introDisplay(value, (result.html || {}).intro);
+        cancelIntroEdit(pid);
+        Toast.success('Project information saved.');
+      }).catch(function () { /* reported */ });
+    });
+  }
+
+  /* Mirrors the read-only half of view.render_detail_row. */
+  function introDisplay(value, html) {
+    var span = document.createElement('span');
+    span.className = 'intro-text' + (value.trim() ? '' : ' intro-text--empty');
+    span.title = 'Double-click to edit';
+    if (value.trim() && html) span.innerHTML = html;
+    else if (value.trim()) span.textContent = value;
+    else span.textContent = 'No general information yet. Double-click to add some.';
+    return span.outerHTML;
   }
 
   /* ─── Advanced Edit: schema-driven Form + RAW overlay ───────────────────── */
-  var AdvEdit = { pid: null, schema: null };
+  var AdvEdit = { pid: null, schema: null, dirty: false };
 
   function valueAt(source, path) {
     var cursor = source;
@@ -487,8 +800,9 @@
 
     var remove = document.createElement('button');
     remove.type = 'button';
-    remove.className = 'del-btn';
+    remove.className = 'btn btn--ghost btn--sm btn--icon btn--danger';
     remove.title = 'Remove';
+    remove.setAttribute('aria-label', 'Remove this row');
     remove.textContent = '✕';
     remove.dataset.action = 'advedit-row-remove';
     wrapper.appendChild(remove);
@@ -514,8 +828,8 @@
 
       var add = document.createElement('button');
       add.type = 'button';
-      add.className = 'advedit-add-row-btn';
-      add.textContent = '➕ Add row';
+      add.className = 'btn btn--outline btn--sm';
+      add.textContent = 'Add row';
       add.dataset.action = 'advedit-row-add';
       add.dataset.section = section.key;
       fieldset.append(container, add);
@@ -586,13 +900,8 @@
       });
   }
 
-  function openAdvancedEdit(pid) {
-    AdvEdit.pid = pid;
-    byId('advedit-title').textContent = '🛠️ Advanced edit — ' + pid;
-    byId('advedit-body-form').textContent = 'Loading...';
-    byId('advanced-edit-overlay').style.display = 'flex';
-
-    Promise.all([
+  function loadAdvancedEdit(pid) {
+    return Promise.all([
       loadSchema(),
       fetch('/api/project/' + encodeURIComponent(pid) + '/raw').then(function (r) { return r.json(); })
     ]).then(function (results) {
@@ -600,7 +909,19 @@
       if (!card.success) throw new Error(card.error || 'Could not load the project');
       renderAdvForm(results[0], card.data || {}, card.body || '');
       byId('advedit-raw-textarea').value = card.raw_text || '';
-    }).catch(function (err) {
+      AdvEdit.dirty = false;
+    });
+  }
+
+  function openAdvancedEdit(pid) {
+    AdvEdit.pid = pid;
+    AdvEdit.dirty = false;
+    byId('advedit-title').textContent = 'Advanced edit — ' + pid;
+    byId('advedit-body-form').textContent = 'Loading...';
+    byId('advanced-edit-overlay').style.display = 'flex';
+    switchAdvTab('form');
+
+    loadAdvancedEdit(pid).catch(function (err) {
       Toast.error('Could not open the project: ' + err.message);
       closeAdvancedEdit();
     });
@@ -615,8 +936,8 @@
     var isForm = tab === 'form';
     byId('advedit-body-form').style.display = isForm ? 'block' : 'none';
     byId('advedit-body-raw').style.display = isForm ? 'none' : 'block';
-    byId('advedit-tab-form').classList.toggle('advedit-tab--active', isForm);
-    byId('advedit-tab-raw').classList.toggle('advedit-tab--active', !isForm);
+    byId('advedit-tab-form').classList.toggle('tab--active', isForm);
+    byId('advedit-tab-raw').classList.toggle('tab--active', !isForm);
     byId('advedit-save-form').style.display = isForm ? '' : 'none';
     byId('advedit-save-raw').style.display = isForm ? 'none' : '';
   }
@@ -629,13 +950,432 @@
     container.appendChild(rowElement(section, {}));
   }
 
+  /* ─── Patching one row instead of reloading the document ────────────────────
+     Ticking a checkbox used to call location.reload(): a white flash, the
+     chart's horizontal scroll position lost, and no feedback beyond the row
+     teleporting. The four note operations now patch the DOM they changed.
+
+     The row built here mirrors view._todo_row: the two agree on the class
+     names and on the data-* contract, and on nothing else. */
+  function monthNames() {
+    var host = document.querySelector('[data-months]');
+    return (host ? host.dataset.months : '').split(',');
+  }
+
+  /* The server's format_date_long, in the browser: `18 September 26`. The
+     month names come from settings.toml through a data attribute, so the two
+     sides cannot drift apart. */
+  function formatDateLong(value) {
+    var text = String(value || '').trim();
+    var match = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}:\d{2}))?$/.exec(text);
+    if (!match) return text;
+    var months = monthNames();
+    var month = parseInt(match[2], 10);
+    if (!months[month - 1]) return text;
+    var out = parseInt(match[3], 10) + ' ' + months[month - 1] + ' ' + match[1].slice(-2);
+    return match[4] ? out + ', ' + match[4] : out;
+  }
+
+  function buildTodoRow(pid, todo, done, prefix) {
+    var row = document.createElement('div');
+    row.className = 'todo-item-row' + (done ? ' done' : '');
+    row.id = prefix + '-' + pid + '-' + todo.id;
+    row.dataset.text = todo.text || '';
+    row.dataset.dl = todo.deadline || '';
+    row.dataset.project = pid;
+    row.dataset.todo = todo.id;
+
+    var check = document.createElement('input');
+    check.type = 'checkbox';
+    check.checked = !!done;
+    check.dataset.action = 'todo-toggle';
+    check.dataset.project = pid;
+    check.dataset.todo = todo.id;
+
+    var text = document.createElement('span');
+    text.className = 'todo-text' + (done ? ' done' : '');
+    text.title = 'Double-click to edit';
+    text.textContent = todo.text || '';
+
+    row.append(check, text);
+
+    var stamp = done ? formatDateLong(todo.completed_at) : formatDateLong(todo.deadline);
+    if (stamp) {
+      var badge = document.createElement('span');
+      badge.className = done ? 'todo-done-at' : 'todo-dl';
+      badge.textContent = stamp;
+      row.appendChild(badge);
+    }
+
+    var remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'btn btn--ghost btn--sm btn--icon btn--danger';
+    remove.title = 'Delete';
+    remove.setAttribute('aria-label', 'Delete this note');
+    remove.textContent = '✕';
+    remove.dataset.action = 'todo-delete';
+    remove.dataset.project = pid;
+    remove.dataset.todo = todo.id;
+    row.appendChild(remove);
+    return row;
+  }
+
+  /* The aggregated card keeps open and completed notes in two labelled groups;
+     a row that changes state moves between them, and a group that does not
+     exist yet is created rather than dropping the row on the floor. */
+  function aggregatedGroup(pid, group) {
+    var head = document.querySelector('[data-card="' + CSS.escape(pid) + '"]');
+    var card = head && head.closest('.global-todo-card');
+    if (!card) return null;
+
+    var existing = card.querySelector('.todo-group[data-group="' + group + '"]');
+    if (existing) return existing;
+
+    var box = document.createElement('div');
+    box.className = 'todo-group';
+    box.dataset.group = group;
+    var label = document.createElement('div');
+    label.className = 'todo-group-label' + (group === 'done' ? ' todo-group-label--history' : '');
+    label.textContent = group === 'done' ? 'Completed' : 'Open actions';
+    box.appendChild(label);
+
+    if (group === 'open') card.insertBefore(box, card.querySelector('.todo-group'));
+    else card.appendChild(box);
+    return box;
+  }
+
+  function refreshCounters() {
+    all('.todos-box[id^="todos-container-"]').forEach(function (box) {
+      var pid = box.id.slice('todos-container-'.length);
+      var count = byId('todos-count-' + pid);
+      if (count) count.textContent = box.querySelectorAll('.todo-item-row').length;
+      var button = byId('btn-hist-' + pid);
+      var history = byId('history-box-' + pid);
+      if (button && history) {
+        button.textContent = 'Completed actions (' +
+          history.querySelectorAll('.todo-item-row').length + ') ' +
+          (isHidden(history) ? CARET_CLOSED : CARET_OPEN);
+      }
+    });
+
+    var counter = byId('global-todos-counter');
+    if (!counter) return;
+    var open = 0, done = 0;
+    all('.todos-box[id^="todos-container-"]').forEach(function (box) {
+      open += box.querySelectorAll('.todo-item-row').length;
+    });
+    all('.history-box').forEach(function (box) {
+      done += box.querySelectorAll('.todo-item-row').length;
+    });
+    counter.textContent = open + ' open / ' + done + ' done';
+  }
+
+  function emptyPlaceholder(container, label) {
+    if (container.querySelector('.todo-item-row')) {
+      var stale = container.querySelector('.todo-empty');
+      if (stale) stale.remove();
+    } else if (!container.querySelector('.todo-empty')) {
+      var empty = document.createElement('div');
+      empty.className = 'todo-empty';
+      empty.textContent = label;
+      container.appendChild(empty);
+    }
+  }
+
+  function afterTodoChange(pid) {
+    var open = byId('todos-container-' + pid);
+    var history = byId('history-box-' + pid);
+    if (open) emptyPlaceholder(open, 'No open note or action.');
+    if (history) emptyPlaceholder(history, 'Nothing in the history yet.');
+    all('.global-todo-card .todo-group').forEach(function (group) {
+      if (!group.querySelector('.todo-item-row')) group.remove();
+    });
+    refreshCounters();
+    UIState.save();
+  }
+
+  var TodoPatch = {
+    add: function (pid, todo) {
+      var container = byId('todos-container-' + pid);
+      if (container) container.appendChild(buildTodoRow(pid, todo, false, 'todo-row'));
+      var group = aggregatedGroup(pid, 'open');
+      if (group) group.appendChild(buildTodoRow(pid, todo, false, 'global-todo-row'));
+      afterTodoChange(pid);
+    },
+
+    toggle: function (pid, todo, done) {
+      todoRows(pid, todo.id).forEach(function (row) { row.remove(); });
+      var target = done ? byId('history-box-' + pid) : byId('todos-container-' + pid);
+      if (target) {
+        var row = buildTodoRow(pid, todo, done, 'todo-row');
+        if (done) target.insertBefore(row, target.firstChild);
+        else target.appendChild(row);
+      }
+      var group = aggregatedGroup(pid, done ? 'done' : 'open');
+      if (group) group.appendChild(buildTodoRow(pid, todo, done, 'global-todo-row'));
+      afterTodoChange(pid);
+    },
+
+    remove: function (pid, todoId) {
+      todoRows(pid, todoId).forEach(function (row) { row.remove(); });
+      afterTodoChange(pid);
+    },
+
+    /* Only open notes are editable, so a rebuilt row is always an open one. */
+    update: function (pid, todoId, text, deadline) {
+      todoRows(pid, todoId).forEach(function (row) {
+        row.replaceWith(buildTodoRow(pid, { id: todoId, text: text, deadline: deadline },
+                                     false, row.id.split('-' + pid + '-')[0]));
+      });
+      afterTodoChange(pid);
+    }
+  };
+
+  var DISCARD = {
+    title: 'Discard your changes?',
+    body: 'What you typed is lost.',
+    confirmLabel: 'Discard',
+    destructive: true
+  };
+  var SAVE_FIELD = {
+    title: 'Save this field?',
+    body: 'The project card is rewritten on disk.',
+    confirmLabel: 'Save'
+  };
+  var SAVE_CARD = {
+    title: 'Save the card?',
+    body: 'The project card is rewritten on disk.',
+    confirmLabel: 'Save'
+  };
+
+  /* ─── Milestones ────────────────────────────────────────────────────────────
+     One dated mark, edited in one place: the diamond on the lane, the chip in
+     the panel and an empty day in the chart all open the same overlay. */
+  function milestoneOf(pid, id) {
+    var chip = document.querySelector('#milestones-' + CSS.escape(pid) +
+      ' [data-milestone="' + CSS.escape(id) + '"]');
+    var diamond = document.querySelector('.milestone[data-project="' + CSS.escape(pid) +
+      '"][data-milestone="' + CSS.escape(id) + '"]');
+    return diamond || chip;
+  }
+
+  function openMilestone(pid, id, isoDate) {
+    var existing = id ? milestoneOf(pid, id) : null;
+    var overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+
+    var box = document.createElement('div');
+    box.className = 'dialog';
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-modal', 'true');
+
+    var title = document.createElement('h3');
+    title.className = 'dialog__title';
+    title.textContent = id ? 'Milestone' : 'New milestone';
+
+    var date = document.createElement('input');
+    date.type = 'date';
+    date.className = 'form-input';
+    date.setAttribute('aria-label', 'Milestone date');
+    date.value = isoDate || (existing ? existing.dataset.date || '' : '');
+    if (!date.value && existing) date.value = '';
+
+    var text = document.createElement('input');
+    text.type = 'text';
+    text.className = 'form-input';
+    text.placeholder = 'What happens on that day';
+    text.setAttribute('aria-label', 'Milestone text');
+    text.value = existing ? existing.dataset.text || '' : '';
+
+    var fields = document.createElement('div');
+    fields.className = 'dialog__fields';
+    fields.append(date, text);
+
+    var actions = document.createElement('div');
+    actions.className = 'dialog__actions';
+
+    var remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'btn btn--ghost btn--sm btn--danger';
+    remove.textContent = 'DELETE';
+    remove.style.marginRight = 'auto';
+    if (!id) remove.hidden = true;
+
+    var cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn btn--secondary btn--sm';
+    cancel.textContent = 'Cancel';
+
+    var save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'btn btn--default btn--sm';
+    save.textContent = 'Save';
+
+    function close() { overlay.remove(); Dialog.open = null; }
+
+    cancel.addEventListener('click', close);
+    overlay.addEventListener('mousedown', function (event) {
+      if (event.target === overlay) close();
+    });
+    save.addEventListener('click', function () {
+      if (!date.value) return Toast.error('A milestone needs a date.');
+      guard('save', {
+        title: 'Save this milestone?',
+        body: 'The card is rewritten on disk.',
+        confirmLabel: 'Save'
+      }, function () {
+        projectApi(pid, 'milestone/save', {
+          milestone_id: id || '', date: date.value, text: text.value
+        }).then(function () {
+          close();
+          location.reload();      // the mark belongs on the lane, not in a list
+        }).catch(function () { /* reported */ });
+      });
+    });
+    remove.addEventListener('click', function () {
+      Dialog.confirm({
+        title: 'Delete this milestone?',
+        body: 'It is removed from the card on disk. This cannot be undone.',
+        confirmLabel: 'DELETE',
+        destructive: true
+      }).then(function (confirmed) {
+        if (!confirmed) return;
+        projectApi(pid, 'milestone/delete', { milestone_id: id }).then(function () {
+          close();
+          location.reload();
+        }).catch(function () { /* reported */ });
+      });
+    });
+
+    actions.append(remove, cancel, save);
+    box.append(title, fields, actions);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    Dialog.open = close;
+    (date.value ? text : date).focus();
+  }
+
+  /* A click on an empty day of a project lane proposes a milestone there. The
+     day comes from the calendar header, which is the only place that knows
+     which column is which date — weekends are not drawn. */
+  function dayAt(offsetX) {
+    var cells = all('#gantt-table .day-cell');
+    var index = Math.floor(offsetX / cssNumber('--col-w', 17));
+    var cell = cells[index];
+    return cell ? cell.dataset.date : '';
+  }
+
+  document.addEventListener('click', function (event) {
+    // Mouse only: on a touch screen this would fire on every scroll of the chart.
+    if (window.matchMedia && !window.matchMedia('(pointer: fine)').matches) return;
+    // A bar that was just dragged ends its gesture with a click on the lane.
+    if (BarDrag.moved) { BarDrag.moved = false; return; }
+    var lane = event.target.closest && event.target.closest('.timeline-row--project');
+    if (!lane || event.target.closest('[data-action]')) return;
+    var day = dayAt(event.clientX - lane.getBoundingClientRect().left);
+    if (day) openMilestone(lane.dataset.lane, '', day);
+  });
+
+  /* ─── Search ────────────────────────────────────────────────────────────────
+     Best effort by agreement: it looks at what the page already shows — titles,
+     people, notes, intros — opens whatever hides a match and marks it. The
+     exhaustive search is the markdown view, which is one document and one
+     ctrl-F. */
+  var SEARCH_IN = '.project-title, .resource-line, .todo-text, .intro-text, ' +
+                  '.global-todo-card__title, .tree__project, .tree__row';
+
+  var Search = {
+    marked: [],
+
+    clear: function () {
+      this.marked.forEach(function (node) {
+        if (node.__plain !== undefined) {
+          node.innerHTML = node.__plain;
+          delete node.__plain;
+        }
+      });
+      this.marked = [];
+    },
+
+    /* Wrap every match inside one element, text node by text node: replacing
+       the whole innerHTML would rebuild markup the server rendered. */
+    mark: function (node, needle) {
+      var walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+      var texts = [];
+      while (walker.nextNode()) texts.push(walker.currentNode);
+
+      var hit = false;
+      texts.forEach(function (text) {
+        var lower = text.nodeValue.toLowerCase();
+        var at = lower.indexOf(needle);
+        if (at === -1) return;
+        if (!hit) {
+          node.__plain = node.innerHTML;
+          hit = true;
+        }
+        var fragment = document.createDocumentFragment();
+        var rest = text.nodeValue;
+        var offset = at;
+        while (offset !== -1) {
+          fragment.appendChild(document.createTextNode(rest.slice(0, offset)));
+          var found = document.createElement('mark');
+          found.textContent = rest.slice(offset, offset + needle.length);
+          fragment.appendChild(found);
+          rest = rest.slice(offset + needle.length);
+          offset = rest.toLowerCase().indexOf(needle);
+        }
+        fragment.appendChild(document.createTextNode(rest));
+        text.replaceWith(fragment);
+      });
+      return hit;
+    },
+
+    /* A match is worth nothing while its row is collapsed. */
+    reveal: function (node) {
+      var card = node.closest('.global-todo-card');
+      if (card) setGlobalTodos(true, false);
+
+      var row = node.closest('tr');
+      if (!row) return;
+      if (row.dataset.groupChild) setGroup(row.dataset.groupChild, true, false);
+      if (row.dataset.projChild) setProject(row.dataset.projChild, true, false);
+      if (row.classList.contains('detail-row')) {
+        var panel = row.dataset.projId;
+        var main = document.querySelector('.project-main-row[data-proj-id="' +
+          CSS.escape(panel) + '"]');
+        if (main) setGroup(main.dataset.groupChild, true, false);
+        setDetail(panel, true, false);
+      }
+    },
+
+    run: function (query) {
+      this.clear();
+      var needle = String(query || '').trim().toLowerCase();
+      var status = byId('search-count');
+      if (needle.length < 2) {
+        if (status) status.textContent = '';
+        return;
+      }
+
+      var self = this;
+      var hits = 0;
+      all(SEARCH_IN).forEach(function (node) {
+        if (!self.mark(node, needle)) return;
+        self.marked.push(node);
+        hits += 1;
+        self.reveal(node);
+      });
+      if (status) status.textContent = hits ? hits + ' found' : 'nothing found';
+    }
+  };
+
   /* ─── Action registry (open/closed: extend without touching the router) ── */
   var ClickActions = {
     'toggle-global': function () {
       setGlobalTodos(isHidden(byId('global-todos-content')));
     },
-    'toggle-tier': function (el, data) {
-      setTier(data.tier, tierRows(data.tier).some(isHidden));
+    'toggle-group': function (el, data) {
+      setGroup(data.group, groupRows(data.group).some(isHidden));
     },
     'toggle-project': function (el, data) {
       var rows = projectRows(data.project);
@@ -649,16 +1389,16 @@
       setHistory(data.project, isHidden(byId('history-box-' + data.project)));
     },
 
-    'expand-tiers': function () {
-      collectTiers().forEach(function (tier) { setTier(tier, true, false); });
+    'expand-groups': function () {
+      collectGroups().forEach(function (group) { setGroup(group, true, false); });
       UIState.save();
     },
-    'collapse-tiers': function () {
-      collectTiers().forEach(function (tier) { setTier(tier, false, false); });
+    'collapse-groups': function () {
+      collectGroups().forEach(function (group) { setGroup(group, false, false); });
       UIState.save();
     },
     'expand-projects': function () {
-      collectTiers().forEach(function (tier) { setTier(tier, true, false); });
+      collectGroups().forEach(function (group) { setGroup(group, true, false); });
       collectProjects().forEach(function (pid) { setProject(pid, true, false); });
       UIState.save();
     },
@@ -668,38 +1408,80 @@
     },
     'toggle-hide-past': function (el, data) {
       UIState.save();
-      window.location.href = '/?hide_past=' + (data.target === '1' ? '1' : '0');
+      var target = data.target === '1' ? '1' : '0';
+      try { localStorage.setItem(HIDE_PAST_KEY, target); } catch (err) { /* noop */ }
+      window.location.href = '/?hide_past=' + target;
     },
 
     'todo-add': function (el, data) {
       var textInput = byId('new-todo-text-' + data.project);
       var dateInput = byId('new-todo-dl-' + data.project);
       if (!textInput || !textInput.value.trim()) return;
-      reloadOnSuccess(projectApi(data.project, 'todo/add', {
+      var payload = {
         text: textInput.value.trim(),
         deadline: dateInput ? dateInput.value : ''
-      }));
+      };
+      guard('save', {
+        title: 'Add this note?',
+        body: 'It is written into the project card.',
+        confirmLabel: 'Add'
+      }, function () {
+        projectApi(data.project, 'todo/add', payload).then(function (result) {
+          if (result.todo) TodoPatch.add(data.project, result.todo, result.html);
+          textInput.value = '';
+          if (dateInput) dateInput.value = '';
+          Toast.success('Note added.');
+        }).catch(function () { /* reported */ });
+      });
     },
     'todo-add-cancel': function (el, data) {
       var textInput = byId('new-todo-text-' + data.project);
       var dateInput = byId('new-todo-dl-' + data.project);
-      if (textInput) textInput.value = '';
-      if (dateInput) dateInput.value = '';
+      if (!textInput || !textInput.value.trim()) {
+        if (dateInput) dateInput.value = '';
+        return;
+      }
+      guard('cancel', DISCARD, function () {
+        textInput.value = '';
+        if (dateInput) dateInput.value = '';
+      });
     },
     'todo-toggle': function (el, data) {
-      reloadOnSuccess(projectApi(data.project, 'todo/toggle', { todo_id: data.todo }));
+      el.disabled = true;
+      projectApi(data.project, 'todo/toggle', { todo_id: data.todo })
+        .then(function (result) {
+          if (!result.todo) return;
+          TodoPatch.toggle(data.project, result.todo, !!result.completed, result.html);
+          // Both lists can be collapsed or off-screen, so the row moving is
+          // not on its own proof that anything happened.
+          Toast.success(result.completed ? 'Note completed.' : 'Note reopened.');
+        })
+        .catch(function () { el.checked = !el.checked; })
+        .then(function () { el.disabled = false; });
     },
     'todo-delete': function (el, data) {
-      if (!confirm('Delete this note?')) return;
-      reloadOnSuccess(projectApi(data.project, 'todo/delete', { todo_id: data.todo }));
+      Dialog.confirm({
+        title: 'Delete this note?',
+        body: 'It is removed from the card on disk. This cannot be undone.',
+        confirmLabel: 'DELETE',
+        destructive: true
+      }).then(function (confirmed) {
+        if (!confirmed) return;
+        projectApi(data.project, 'todo/delete', { todo_id: data.todo }).then(function () {
+          TodoPatch.remove(data.project, data.todo);
+          Toast.success('Note deleted.');
+        }).catch(function () { /* reported */ });
+      });
     },
-    'todo-edit':   function (el, data) { startEdit(data.project, data.todo); },
     'todo-save':   function (el, data) { commitEdit(data.project, data.todo); },
-    'todo-cancel': function (el, data) { cancelEdit(data.project, data.todo); },
+    'todo-cancel': function (el, data) {
+      guard('cancel', DISCARD, function () { cancelEdit(data.project, data.todo); });
+    },
 
-    'intro-edit':   function (el, data) { startIntroEdit(data.project); },
     'intro-save':   function (el, data) { commitIntroEdit(data.project); },
-    'intro-cancel': function (el, data) { cancelIntroEdit(data.project); },
+    'intro-cancel': function (el, data) {
+      guard('cancel', DISCARD, function () { cancelIntroEdit(data.project); });
+    },
 
     'platform-toggle': function (el, data) {
       el.classList.toggle('active');
@@ -710,33 +1492,124 @@
       });
     },
 
+    'field-save':   function (el) { saveField(el.closest('.editable-field')); },
+    'field-cancel': function (el) {
+      var field = el.closest('.editable-field');
+      guard('cancel', DISCARD, function () { resetField(field); });
+    },
+
     'link-add': function (el, data) {
       var container = byId(data.kind + '-container-' + data.project);
       if (!container) return;
       container.appendChild(buildLinkRow(container, data.project, data.kind));
     },
-    'link-remove': function (el, data) {
+    /* Inside a form now: the row goes when the field is saved, and comes back
+       if it is cancelled. */
+    'link-remove': function (el) {
       var row = el.closest('.link-row');
-      if (row) row.remove();
-      saveProjectFields(data.project);
+      if (!row) return;
+      if (row.dataset.added === '1') row.remove();
+      else {
+        row.hidden = true;
+        var input = row.querySelector('input');
+        if (input) input.value = '';
+      }
+    },
+
+    'attachment-delete': function (el, data) {
+      Dialog.confirm({
+        title: 'Remove ' + data.name + '?',
+        body: 'The file is deleted from the vault. This cannot be undone.',
+        confirmLabel: 'DELETE',
+        destructive: true
+      }).then(function (confirmed) {
+        if (!confirmed) return;
+        request('DELETE', attachmentUrl(data.project, data.name), null, 'application/json')
+          .then(function () {
+            var row = el.closest('.attachment-row');
+            if (row) row.remove();
+            Toast.success('Attachment removed.');
+          }).catch(function () { /* reported */ });
+      });
     },
 
     'advanced-edit-open': function (el, data) { openAdvancedEdit(data.project); },
-    'advanced-edit-close': function () { closeAdvancedEdit(); },
+    'advanced-edit-close': function () {
+      guard('cancel', DISCARD, function () { closeAdvancedEdit(); });
+    },
     'advanced-edit-backdrop': function (el, data, event) {
       if (event && event.target && event.target.id === 'advanced-edit-overlay') closeAdvancedEdit();
     },
-    'advanced-edit-tab': function (el, data) { switchAdvTab(data.tab); },
+    /* The two tabs are two editors over one card, and neither can serialise
+       the other: switching with unsaved changes reloads the card, so the tab
+       that is about to be shown is never stale. */
+    'advanced-edit-tab': function (el, data) {
+      if (!AdvEdit.dirty) return switchAdvTab(data.tab);
+      Dialog.confirm({
+        title: 'Discard your changes?',
+        body: 'The other tab is a second editor over the same card, and it does ' +
+              'not know what you typed here. It is reloaded from the file.',
+        confirmLabel: 'Discard',
+        destructive: true
+      }).then(function (confirmed) {
+        if (!confirmed) return;
+        loadAdvancedEdit(AdvEdit.pid).then(function () { switchAdvTab(data.tab); });
+      });
+    },
+    /* Still a reload: an advanced save can move the project to another tier or
+       rewrite its whole timeline, so the chart around it is no longer valid. */
     'advanced-edit-save-form': function () {
-      if (AdvEdit.pid) reloadOnSuccess(projectApi(AdvEdit.pid, 'advanced-update', collectAdvPayload()));
+      if (!AdvEdit.pid) return;
+      var payload = collectAdvPayload();
+      guard('save', SAVE_CARD, function () {
+        reloadOnSuccess(projectApi(AdvEdit.pid, 'advanced-update', payload));
+      });
     },
     'advanced-edit-save-raw': function () {
-      if (AdvEdit.pid) {
-        reloadOnSuccess(projectApi(AdvEdit.pid, 'raw-update', {
-          raw_text: byId('advedit-raw-textarea').value
-        }));
-      }
+      if (!AdvEdit.pid) return;
+      var raw = byId('advedit-raw-textarea').value;
+      guard('save', SAVE_CARD, function () {
+        reloadOnSuccess(projectApi(AdvEdit.pid, 'raw-update', { raw_text: raw }));
+      });
     },
+    'view-tab': function (el, data) {
+      all('.tabs .tab').forEach(function (tab) {
+        tab.classList.toggle('tab--active', tab === el);
+      });
+      ['structure', 'markdown'].forEach(function (name) {
+        var panel = byId('view-' + name);
+        if (panel) panel.hidden = name !== data.tab;
+      });
+    },
+    'vault-markdown-save': function (el) {
+      var editor = byId('vault-markdown');
+      if (!editor) return;
+      guard('save', {
+        title: 'Save every card?',
+        body: 'Each block is written to the card it names. A card with no block ' +
+              'here is left alone — nothing is deleted.',
+        confirmLabel: 'Save all'
+      }, function () {
+        el.disabled = true;
+        post('/api/project/_batch/markdown', { markdown: editor.value })
+          .then(function (result) {
+            var created = (result.created || []).length;
+            var updated = (result.updated || []).length;
+            (result.skipped || []).forEach(function (entry) {
+              Toast.error('Skipped ' + entry[0] + ': ' + entry[1]);
+            });
+            Toast.success(updated + ' card' + (updated === 1 ? '' : 's') + ' saved' +
+              (created ? ', ' + created + ' created' : '') + '.');
+          })
+          .catch(function () { /* reported */ })
+          .then(function () { el.disabled = false; });
+      });
+    },
+
+    'milestone-open': function (el, data) {
+      openMilestone(data.project, data.milestone || '', '');
+    },
+
     'advedit-row-add': function (el, data) { addSchemaRow(data.section); },
     'advedit-row-remove': function (el) {
       var row = el.closest('.advedit-row');
@@ -745,11 +1618,24 @@
   };
 
   var ChangeActions = {
-    'project-field': function (el, data) { saveProjectFields(data.project); }
+    'preference': function (el, data) { Prefs.set(data.pref, el.checked); },
+    'search': function (el) { Search.run(el.value); },
+    'attachment-upload': function (el, data) {
+      var files = Array.prototype.slice.call(el.files || []);
+      if (!files.length) return;
+      el.disabled = true;
+      // One at a time: a single failure (name taken, too large) stops the
+      // batch with its own message instead of a pile of toasts.
+      var chain = Promise.resolve();
+      files.forEach(function (file) {
+        chain = chain.then(function () { return uploadAttachment(data.project, file); });
+      });
+      reloadOnSuccess(chain.catch(function (err) { el.disabled = false; throw err; }));
+    }
   };
 
-  function collectTiers() {
-    return all('.tier-row').map(function (row) { return row.dataset.tier; }).filter(Boolean);
+  function collectGroups() {
+    return all('.tier-row').map(function (row) { return row.dataset.group; }).filter(Boolean);
   }
 
   function collectProjects() {
@@ -770,12 +1656,15 @@
     input.className = template ? template.className : 'form-input form-input--grow';
     input.placeholder = template ? template.placeholder : '';
     input.value = '';
-    input.dataset.change = 'project-field';
-    input.dataset.project = pid;
+    input.dataset.param = template ? template.dataset.param : '';
+    input.dataset.kind = 'list';
+    row.dataset.added = '1';
 
     var remove = document.createElement('button');
     remove.type = 'button';
-    remove.className = 'del-btn';
+    remove.className = 'btn btn--ghost btn--sm btn--icon btn--danger';
+    remove.title = 'Remove';
+    remove.setAttribute('aria-label', 'Remove this link');
     remove.textContent = '✕';
     remove.dataset.action = 'link-remove';
     remove.dataset.project = pid;
@@ -784,6 +1673,33 @@
     row.append(input, remove);
     return row;
   }
+
+  /* ─── Double click opens an editor ─────────────────────────────────────────
+     Every editable value renders read-only and becomes an editor on double
+     click: one gesture everywhere beats a pencil button per field. */
+  document.addEventListener('dblclick', function (event) {
+    var note = event.target.closest('.todo-text');
+    if (note && !note.classList.contains('done')) {
+      var row = note.closest('.todo-item-row');
+      if (row && row.dataset.project) startEdit(row.dataset.project, row.dataset.todo);
+      return;
+    }
+    var intro = event.target.closest('.intro-text');
+    var box = intro && intro.closest('.intro-box');
+    if (box && box.dataset.project) return startIntroEdit(box.dataset.project);
+
+    var view = event.target.closest('.editable-view');
+    if (view) openField(view.closest('.editable-field'));
+  });
+
+  /* The same gesture from the keyboard: the view is focusable, Enter opens it. */
+  document.addEventListener('keydown', function (event) {
+    if (event.key !== 'Enter') return;
+    var view = event.target.closest && event.target.closest('.editable-view');
+    if (!view) return;
+    event.preventDefault();
+    openField(view.closest('.editable-field'));
+  });
 
   /* ─── Single event-delegation router ────────────────────────────────────── */
   document.addEventListener('click', function (event) {
@@ -799,11 +1715,35 @@
     handler(target, target.dataset, event);
   });
 
+  var searchTimer = null;
+
+  document.addEventListener('input', function (event) {
+    if (event.target.closest && event.target.closest('#advanced-edit-overlay')) {
+      AdvEdit.dirty = true;
+    }
+    if (event.target.dataset && event.target.dataset.change === 'search') {
+      clearTimeout(searchTimer);
+      var value = event.target.value;
+      searchTimer = setTimeout(function () { Search.run(value); }, 150);
+    }
+  });
+
   document.addEventListener('change', function (event) {
     var target = event.target.closest('[data-change]');
     if (!target) return;
     var handler = ChangeActions[target.dataset.change];
     if (handler) handler(target, target.dataset);
+  });
+
+  document.addEventListener('keydown', function (event) {
+    if (event.key !== 'Escape') return;
+    if (Dialog.open) return Dialog.open(false);
+    if (!isHidden(byId('advanced-edit-overlay'))) return closeAdvancedEdit();
+    var field = byId('search-field');
+    if (field && field.value) {
+      field.value = '';
+      Search.run('');
+    }
   });
 
   /* ─── Sticky column resize ──────────────────────────────────────────────────
@@ -883,6 +1823,179 @@
     }
   };
 
+  /* ─── Reordering the notes ──────────────────────────────────────────────────
+     The same gesture and the same indicator as the project rows, one list at a
+     time: a note can only move inside the project it belongs to. */
+  var TodoOrder = {
+    init: function () {
+      var dragged = null;
+
+      function box(node) {
+        return node.closest ? node.closest('.todos-box[id^="todos-container-"]') : null;
+      }
+
+      function clear() {
+        all('.todo-item-row.drag-over-top, .todo-item-row.drag-over-bottom')
+          .forEach(function (row) {
+            row.classList.remove('drag-over-top', 'drag-over-bottom');
+          });
+      }
+
+      document.addEventListener('dragstart', function (event) {
+        var row = event.target.closest('.todo-item-row[draggable]');
+        if (!row || !box(row)) return;
+        dragged = row;
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', row.dataset.todo || '');
+        row.classList.add('is-dragging');
+      });
+
+      document.addEventListener('dragend', function () {
+        if (dragged) dragged.classList.remove('is-dragging');
+        dragged = null;
+        clear();
+      });
+
+      document.addEventListener('dragover', function (event) {
+        if (!dragged) return;
+        var row = event.target.closest('.todo-item-row');
+        if (!row || row === dragged || box(row) !== box(dragged)) return;
+        event.preventDefault();
+        clear();
+        var rect = row.getBoundingClientRect();
+        var below = (event.clientY - rect.top) > (rect.height / 2);
+        row.classList.add(below ? 'drag-over-bottom' : 'drag-over-top');
+        row.dataset.dropPos = below ? 'after' : 'before';
+      });
+
+      document.addEventListener('drop', function (event) {
+        if (!dragged) return;
+        var row = event.target.closest('.todo-item-row');
+        var container = box(dragged);
+        if (!row || row === dragged || !container || box(row) !== container) return;
+        event.preventDefault();
+        clear();
+
+        if (row.dataset.dropPos === 'after') row.after(dragged);
+        else row.before(dragged);
+
+        var pid = dragged.dataset.project;
+        var order = Array.prototype.slice
+          .call(container.querySelectorAll('.todo-item-row'))
+          .map(function (item) { return item.dataset.todo; });
+
+        projectApi(pid, 'todo/reorder', { order: order })
+          .then(function () { Toast.success('Notes reordered.'); })
+          .catch(function () { location.reload(); });   // put the list back as stored
+      });
+    }
+  };
+
+  /* ─── Dragging and resizing the bars ────────────────────────────────────────
+     A bar is a span of columns, and a column is a working day: everything here
+     is done in whole columns, and the dates come from the calendar header,
+     which is the only thing that knows which column is which day (weekends are
+     not drawn, so no arithmetic can be trusted to do it). */
+  var BarDrag = {
+    moved: false,
+
+    /* Whole working days, forwards or backwards. The bar's own dates are what
+       move — never the column it happens to be drawn at, which is clipped to
+       the visible scale whenever "show from today" hides its start. */
+    shift: function (iso, days) {
+      var parts = iso.split('-');
+      var date = new Date(Date.UTC(+parts[0], +parts[1] - 1, +parts[2]));
+      var step = days < 0 ? -1 : 1;
+      var left = Math.abs(days);
+      while (left > 0) {
+        date.setUTCDate(date.getUTCDate() + step);
+        if (date.getUTCDay() !== 0 && date.getUTCDay() !== 6) left -= 1;
+      }
+      while (date.getUTCDay() === 0 || date.getUTCDay() === 6) {
+        date.setUTCDate(date.getUTCDate() + step);
+      }
+      return date.toISOString().slice(0, 10);
+    },
+
+    init: function () {
+      var table = byId('gantt-table');
+      var self = this;
+      if (!table) return;
+
+      table.addEventListener('mousedown', function (event) {
+        var bar = event.target.closest('.task-bar');
+        if (!bar || !bar.dataset.project || event.button !== 0) return;
+
+        var column = cssNumber('--col-w', 17);
+        var first = Math.round((parseFloat(bar.style.left) - 2) / column);
+        var span = Math.max(1, Math.round((parseFloat(bar.style.width) + 4) / column));
+        var grip = event.target.dataset.grip || 'move';
+        var startX = event.clientX;
+
+        // Stops the row's own HTML5 drag: a bar is not a reorder handle.
+        event.preventDefault();
+        bar.classList.add('is-dragging');
+        self.moved = false;
+
+        function columnsMoved(clientX) {
+          return Math.round((clientX - startX) / column);
+        }
+
+        function preview(event) {
+          var delta = columnsMoved(event.clientX);
+          if (delta) self.moved = true;
+          var left = first, width = span;
+          if (grip === 'move') left = Math.max(0, first + delta);
+          else if (grip === 'start') {
+            left = Math.min(Math.max(0, first + delta), first + span - 1);
+            width = span - (left - first);
+          } else {
+            width = Math.max(1, span + delta);
+          }
+          bar.style.left = (left * column + 2) + 'px';
+          bar.style.width = (width * column - 4) + 'px';
+        }
+
+        function finish() {
+          document.removeEventListener('mousemove', preview);
+          document.removeEventListener('mouseup', finish);
+          bar.classList.remove('is-dragging');
+
+          var left = Math.round((parseFloat(bar.style.left) - 2) / column);
+          var width = Math.max(1, Math.round((parseFloat(bar.style.width) + 4) / column));
+          if (!self.moved || (left === first && width === span)) {
+            return self.reset(bar, first, span, column);
+          }
+
+          var from = bar.dataset.start;
+          var to = bar.dataset.end;
+          if (grip !== 'end') from = self.shift(from, left - first);
+          if (grip !== 'start') to = self.shift(to, (left + width) - (first + span));
+          if (to < from) return self.reset(bar, first, span, column);
+
+          guard('save', {
+            title: 'Move this bar?',
+            body: from + ' → ' + to + ', written into the card.',
+            confirmLabel: 'Move'
+          }, function () {
+            projectApi(bar.dataset.project, 'timeline/move', {
+              task_id: bar.dataset.task || '', start: from, end: to
+            }).then(function () { location.reload(); })
+              .catch(function () { self.reset(bar, first, span, column); });
+          });
+        }
+
+        document.addEventListener('mousemove', preview);
+        document.addEventListener('mouseup', finish);
+      });
+    },
+
+    reset: function (bar, first, span, column) {
+      bar.style.left = (first * column + 2) + 'px';
+      bar.style.width = (span * column - 4) + 'px';
+    }
+  };
+
   /* ─── Drag & drop reordering ────────────────────────────────────────────── */
   var DragAndDrop = {
     init: function () {
@@ -891,9 +2004,14 @@
       if (!tbody) return;
 
       function clearMarkers() {
-        all('.drag-over-top, .drag-over-bottom').forEach(function (el) {
-          el.classList.remove('drag-over-top', 'drag-over-bottom');
+        all('.drag-over-top, .drag-over-bottom, .drag-over-into').forEach(function (el) {
+          el.classList.remove('drag-over-top', 'drag-over-bottom', 'drag-over-into');
         });
+      }
+
+      function isCollapsed(group) {
+        var rows = groupRows(group);
+        return !rows.length || rows.some(isHidden);
       }
 
       function targetRow(el) {
@@ -932,8 +2050,11 @@
 
         clearMarkers();
         if (row.classList.contains('tier-row')) {
-          row.classList.add('drag-over-bottom');
-          row.dataset.dropPos = 'after';
+          // A collapsed tier shows no position to choose, so the whole row is
+          // the target and the project is appended last.
+          var into = isCollapsed(row.dataset.group);
+          row.classList.add(into ? 'drag-over-into' : 'drag-over-bottom');
+          row.dataset.dropPos = into ? 'into' : 'after';
         } else {
           var rect = row.getBoundingClientRect();
           var bottomHalf = (event.clientY - rect.top) > (rect.height / 2);
@@ -941,11 +2062,6 @@
           row.dataset.dropPos = bottomHalf ? 'after' : 'before';
         }
         event.dataTransfer.dropEffect = 'move';
-      });
-
-      tbody.addEventListener('dragleave', function (event) {
-        var row = targetRow(event.target);
-        if (row) row.classList.remove('drag-over-top', 'drag-over-bottom');
       });
 
       tbody.addEventListener('drop', function (event) {
@@ -957,31 +2073,73 @@
 
         var dropPos = target.dataset.dropPos || 'before';
         var moved = draggedRow.dataset.projId;
-        var currentTier = null;
+        var currentGroup = null;
         var order = [];
+        var appendTo = dropPos === 'into' ? target.dataset.group : null;
+
+        /* "Into a group" means last inside it, which is only known once the
+           group's last project has gone by. */
+        function flushAppend(nextGroup) {
+          if (appendTo && currentGroup === appendTo && nextGroup !== appendTo) {
+            order.push({ id: moved, group: appendTo });
+            appendTo = null;
+          }
+        }
 
         all('.gantt-table tbody > tr').forEach(function (row) {
           if (row.classList.contains('tier-row')) {
-            currentTier = row.dataset.tier;
-            if (row === target) order.push({ id: moved, tier: currentTier });
+            flushAppend(row.dataset.group);
+            currentGroup = row.dataset.group;
+            if (row === target && dropPos !== 'into') order.push({ id: moved, group: currentGroup });
             return;
           }
           if (!row.classList.contains('project-main-row')) return;
 
-          if (row === target && dropPos === 'before') order.push({ id: moved, tier: currentTier });
-          if (row !== draggedRow) order.push({ id: row.dataset.projId, tier: currentTier });
-          if (row === target && dropPos === 'after') order.push({ id: moved, tier: currentTier });
+          if (row === target && dropPos === 'before') order.push({ id: moved, group: currentGroup });
+          if (row !== draggedRow) order.push({ id: row.dataset.projId, group: currentGroup });
+          if (row === target && dropPos === 'after') order.push({ id: moved, group: currentGroup });
         });
+        flushAppend(null);
 
         reloadOnSuccess(post('/api/project/_batch/reorder', { order: order }));
       });
     }
   };
 
+  /* The server opens on today; only the opposite choice needs carrying over,
+     and only when the URL is silent — a link that spells `hide_past` out wins. */
+  function restoreHidePast() {
+    if (location.search.indexOf('hide_past=') !== -1) return false;
+    var stored = null;
+    try { stored = localStorage.getItem(HIDE_PAST_KEY); } catch (err) { return false; }
+    if (stored !== '0') return false;
+    location.replace('/?hide_past=0');
+    return true;
+  }
+
+  function loadStyleMaps() {
+    var host = document.querySelector('[data-status-styles]');
+    if (!host) return;
+    try {
+      STATUS_STYLES = JSON.parse(host.dataset.statusStyles);
+      DEADLINE_STYLES = JSON.parse(host.dataset.deadlineStyles);
+    } catch (err) { /* the pills keep the colour the server gave them */ }
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
+    if (restoreHidePast()) return;
+    loadStyleMaps();
+    Prefs.load();
     UIState.restore();
-    ColumnResize.init();
-    ColumnResize.restore();
-    DragAndDrop.init();
+    // Column resizing and row reordering both need a pointing device. On touch
+    // the CSS hides their handles; skipping the wiring here also keeps a width
+    // saved on a desktop from squeezing the chart on a phone.
+    if (window.matchMedia && window.matchMedia('(pointer: fine)').matches) {
+      ColumnResize.init();
+      ColumnResize.restore();
+      DragAndDrop.init();
+      BarDrag.init();
+      TodoOrder.init();
+    }
   });
 })();
