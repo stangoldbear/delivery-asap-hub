@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/).
 
+## 1.1.1 — 2026-09-11
+
+### Fixed
+
+- The 1.1.0 notes announced an installable app — a manifest, a service worker
+  and icons. None of it is in this repository: the progressive web app is a
+  milestone of its own and was deliberately left out of 1.1.0, and the notes
+  were not brought in line before the tag. The entry is gone, along with a
+  reference to a build script that is not part of a release either. Nothing in
+  the code changed.
+
 ## 1.1.0 — 2026-09-11
 
 - Clicking a person in the label column opens the timeline row they own — who
@@ -44,8 +55,8 @@ All notable changes to this project are documented here. The format follows
   that project's people are listed, and the row itself held open-looking for as
   long as its panel is.
 - Ten light themes beside the thirteen dark ones, in their own half of the
-  picker. Both sets are generated from a palette table by
-  `dev-tools/make-themes.py`.
+  picker. Both sets are generated from one palette table, so a theme is a
+  block of tokens and never a second copy of the stylesheet.
 - A zoom: Day, Week or Month. A column is always one working day — the zoom
   decides how wide it is drawn and the header says as much as it still can.
 - The footer is a single line pinned to the bottom of the window, so the
@@ -138,10 +149,8 @@ All notable changes to this project are documented here. The format follows
 - **Moving a project no longer needs a drag**: Move up, Move down and Move to a
   band, from the panel header, through the same endpoint — which is also the
   first time the chart could be reordered from a keyboard.
-- **It installs.** A manifest, a service worker that caches the shell and never
-  the data, and icons written by `dev-tools/make-icons.py` with no dependency
-  but `zlib`. The 401 page carries a token field, because a standalone window
-  has no address bar to paste a link into.
+- The 401 page carries a token field, so a hub reached from the network can be
+  opened from a link that has lost its token.
 - A public page under `docs/`, ready for GitHub Pages.
 
 ### Fixed
