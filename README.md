@@ -5,7 +5,7 @@ knowledge vault on disk, rendered as an interactive Gantt chart with per
 project notes, actions, links, attachments and an editable card schema.
 
 Nothing leaves your machine, nothing is installed: it is Python 3.11+ standard
-library and two static assets.
+library, two stylesheets and two scripts.
 
 ![projects → people](docs/hierarchy.svg)
 
@@ -49,19 +49,22 @@ hostile network it is no substitute for TLS.
 ## The chart
 
 The toolbar carries a search, a depth, a zoom and a window. The depth levels
-are **Groups**, **Projects**, **Stakeholders** and **All details**: absolute
+are **Compact**, **Projects**, **Stakeholders** and **All details**: absolute
 levels rather than toggles, so each one does the same thing whatever is folded
-right now. The zoom is **Day**, **Week** or **Month**; a column is always a
-working day, and the zoom decides how wide it is drawn. The window is what the
-chart is drawn through: from today, the last 30 days, this year, all dates, or
+right now. **Compact** is one line per project, the drag handle, the number,
+the name and its span bar, which is a third shorter than a normal row. The
+zoom is **Day**, **Week** or **Month**; a column is always a working day, and
+the zoom decides how wide it is drawn. The window is what the chart is drawn
+through: from today, the last 30 days, this year, all dates, or
 from a date you pick. The choice travels in the URL (`?from=…`) and is
 remembered per browser, and so is everything you collapsed, opened and scrolled
 to: a save reloads the page and puts you back where you were, including the
 chart's own horizontal position.
 
-The footer sets the theme (System, Light, Dark, or one of thirteen palettes
-borrowed from well-known editors behind **More…**) and whether saving and
-discarding ask first.
+**Settings**, the button in the footer, holds four groups: the theme (System,
+Light, Dark, or one of twenty-three palettes borrowed from well-known editors
+behind **More…**), the priority band, the chart's weekday letters, and whether
+saving and discarding ask first. They are per-browser preferences.
 
 Bars are dragged and resized in the chart: grab one in the middle to move it,
 or either edge to change where it starts or ends. Whole working days, applied
@@ -86,8 +89,8 @@ rank: full accent at the top of the list, fading to a near-grey at the bottom.
 With a dozen projects two neighbours barely differ, because the band is meant
 to be read as a ramp down the list rather than as a project's identity, and the
 number beside it is what names a position. The two ends are worked out against
-whichever theme is on, so the band holds the same contrast on all of them. Hue,
-intensity, fade and tint are in **Settings**, with four presets.
+whichever theme is on, so the band holds the same contrast on all of them.
+Colour, intensity, fade and tint are in **Settings**, with four presets.
 
 ## On a phone
 
@@ -108,11 +111,11 @@ device: resizing the label column, and dragging rows to reorder them.
 ## Two views over the vault
 
 The chart is one reading of the cards; **Hierarchy** is the other, and the
-header switches between them. *Structure* lists every project and then every value the
-card holds, under the names the card uses (the keys this codebase knows
-nothing about included, and the `## Notes` body) with each project foldable on
-its own. *Markdown* is
-every card concatenated in the same order, editable in one go: a block whose
+header switches between them. *Structure* lists every project and then every
+value the card holds, under the names the card uses (the keys this codebase
+knows nothing about included, and the `## Notes` body) with each project
+foldable on its own. *Markdown* is every card concatenated in the same order,
+editable in one go: a block whose
 `- id:` is unknown creates a card, and a card whose block is not in the text is
 left alone. Nothing is ever deleted from that screen. The same document
 downloads as `vault-YYYY-MM.md`, which is the monthly snapshot.
@@ -236,8 +239,8 @@ Layers, each with one reason to change; dependencies point inward and only
 Two rules worth keeping:
 
 - Data never reaches the browser inside executable code. Values travel as
-  escaped text or escaped `data-*` attributes; `static/app.js` is a real file
-  that Python never generates.
+  escaped text or escaped `data-*` attributes; every file under `static/` is a
+  real file that Python never generates.
 - Layout metrics live in one place. `settings.py` emits them as CSS custom
   properties; the stylesheet and the resize script read them, they never
   restate them.

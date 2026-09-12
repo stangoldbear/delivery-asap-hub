@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/).
 
+## 1.2.1 - 2026-09-12
+
+### Fixed
+
+- The README described a toolbar that 1.2.0 had already changed. The depth
+  levels read **Groups**, which is now **Compact**, and the level was not
+  described at all.
+- The README counted thirteen themes behind **More…**. There are twenty-three,
+  and the ten light ones arrived in 1.1.0.
+- The README said the footer sets the theme and the confirmations. They moved
+  into **Settings** in 1.1.0, along with the chart's weekday letters, and 1.2.0
+  added the priority band beside them. The footer carries the button that opens
+  it.
+- The band's first control is labelled Colour in the interface. The README
+  called it Hue.
+- The README and the public page both counted the browser assets wrong. The
+  page has linked two stylesheets and two scripts since 1.1.0, when the theme
+  gallery and the before-the-first-paint script arrived.
+- The public page offered "a year on one screen" at the widest zoom. The month
+  zoom looks 760 days ahead, which is two years.
+- The public page said "no reduced tier" of the free plan. It means a pricing
+  level, but the word now has a retired meaning in this product, so it reads
+  as plan.
+
 ## 1.2.0 - 2026-09-12
 
 ### Changed
