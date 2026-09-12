@@ -1,7 +1,6 @@
 # Store credit as a payment method
 - id: project-9-store-credit
 - type: project
-- tier: tier-3
 - priority: 9
 - status: blocked
 - blocked_reason:

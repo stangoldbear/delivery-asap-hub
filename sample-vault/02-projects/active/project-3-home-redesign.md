@@ -1,7 +1,6 @@
 # Home page redesign
 - id: project-3-home-redesign
 - type: project
-- tier: tier-1
 - priority: 3
 - status: active
 - intro: Full rebrand of the home page, including the top banner and the new editorial modules.

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Delivery ASAP hub — a delivery manager's second brain, in markdown files you own</title>
+<title>Delivery ASAP hub: a delivery manager's second brain, in markdown files you own</title>
 <meta name="description" content="A local, dependency-free delivery control center: a folder of markdown cards rendered as an interactive Gantt chart, with notes, milestones and a phone that works. Free, open source, self-hostable.">
 <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0b1220" media="(prefers-color-scheme: dark)">
@@ -37,7 +37,7 @@
     <p class="eyebrow">Free · open source · self-hosted</p>
     <h1>A delivery manager's second brain,<br>in markdown files you own.</h1>
     <p class="lead">One folder. One file per project. Open it and you get a live
-    delivery chart — tiers, timelines, people, milestones, notes and actions —
+    delivery chart (priorities, timelines, people, milestones, notes and actions)
     that writes everything straight back into the markdown. No database, no
     cloud, no account, no build step, no dependency beyond Python.</p>
 
@@ -45,7 +45,7 @@
       <a class="btn btn--primary" href="#selfhost">Run it in one command</a>
       <a class="btn btn--ghost" href="https://github.com/stangoldbear/delivery-asap-hub">Read the source</a>
     </div>
-    <p class="hero__note">MIT licensed. Your vault never leaves your machine —
+    <p class="hero__note">MIT licensed. Your vault never leaves your machine:
     there is nowhere for it to go.</p>
 
     <div class="shot" aria-hidden="true">
@@ -53,19 +53,18 @@
         &nbsp;Delivery ASAP hub — 17 projects</div>
       <div class="shot__grid">
         <div class="shot__labels">
-          <div class="shot__row shot__row--group">Tier 1 — core &amp; compliance</div>
-          <div class="shot__row" style="--rail:hsl(var(--tier-1))"><strong>1</strong> Navigation menu <span class="pill pill--active">active</span></div>
-          <div class="shot__row shot__row--sub" style="--rail:hsl(var(--tier-1))">└─ Backend: Ada L.</div>
-          <div class="shot__row shot__row--sub" style="--rail:hsl(var(--tier-1))">└─ iOS: Rita L.</div>
-          <div class="shot__row" style="--rail:hsl(var(--tier-1))"><strong>2</strong> Eco labels <span class="pill pill--blocked">blocked</span></div>
-          <div class="shot__row shot__row--group">Tier 2 — important</div>
-          <div class="shot__row" style="--rail:hsl(var(--tier-2))"><strong>3</strong> Carrier tracking <span class="pill pill--active">active</span></div>
-          <div class="shot__row shot__row--sub" style="--rail:hsl(var(--tier-2))">└─ Android: Linus P.</div>
+          <div class="shot__row" style="--rail:hsl(var(--band-1))"><strong>1</strong> Navigation menu <span class="pill pill--active">active</span></div>
+          <div class="shot__row shot__row--sub" style="--rail:hsl(var(--band-1))">└─ Backend: Ada L.</div>
+          <div class="shot__row shot__row--sub" style="--rail:hsl(var(--band-1))">└─ iOS: Rita L.</div>
+          <div class="shot__row" style="--rail:hsl(var(--band-2))"><strong>2</strong> Eco labels <span class="pill pill--blocked">blocked</span></div>
+          <div class="shot__row" style="--rail:hsl(var(--band-3))"><strong>3</strong> Carrier tracking <span class="pill pill--active">active</span></div>
+          <div class="shot__row shot__row--sub" style="--rail:hsl(var(--band-3))">└─ Android: Linus P.</div>
+          <div class="shot__row" style="--rail:hsl(var(--band-4))"><strong>4</strong> Store credit <span class="pill pill--active">active</span></div>
         </div>
         <div>
           <div class="shot__lane" style="background:hsl(var(--muted))"></div>
           <div class="shot__lane">
-            <span class="shot__bar-piece" style="left:6%;width:62%;background:hsl(var(--tier-1)/.55)"></span>
+            <span class="shot__bar-piece" style="left:6%;width:62%;background:hsl(var(--band-1)/.55)"></span>
             <span class="shot__mark" style="left:41%"></span>
             <span class="shot__mark" style="left:64%"></span>
             <span class="shot__today" style="left:22%"></span>
@@ -78,7 +77,7 @@
           </div>
           <div class="shot__lane" style="background:hsl(var(--muted))"></div>
           <div class="shot__lane">
-            <span class="shot__bar-piece" style="left:20%;width:44%;background:hsl(var(--tier-2)/.55)"></span>
+            <span class="shot__bar-piece" style="left:20%;width:44%;background:hsl(var(--band-3)/.55)"></span>
             <span class="shot__mark" style="left:62%"></span>
             <span class="shot__today" style="left:22%"></span>
           </div>
@@ -92,14 +91,14 @@
 <section id="what">
   <div class="wrap">
     <p class="eyebrow">Three promises</p>
-    <h2>The parts that matter are the ones you already trust.</h2>
+    <h2>A folder, a loopback port, and the standard library.</h2>
     <div class="grid grid--3">
       <div class="card">
         <h3>Your files stay yours</h3>
         <p>A project is a markdown file you can read, grep, edit in any editor
-        and keep in git. The application is a renderer with opinions, not a
-        vault with a lock on it. Delete it tomorrow and your work is still
-        there, in plain text.</p>
+        and keep in git. The application renders those files and writes them
+        back; it never takes custody of them. Delete it tomorrow and your work
+        is still there, in plain text.</p>
       </div>
       <div class="card">
         <h3>No cloud, no account</h3>
@@ -111,7 +110,7 @@
         <h3>No build step, no dependencies</h3>
         <p>Python 3.11 and its standard library, one stylesheet, one script.
         No npm, no bundler, no framework to upgrade at 2am. Clone it and run
-        it — that is the whole installation.</p>
+        it. That is the whole installation.</p>
       </div>
     </div>
   </div>
@@ -124,17 +123,18 @@
     <div class="grid grid--2">
       <div class="card">
         <h3>The chart</h3>
-        <p>Tiers in the order you declare them, then DONE and DROPPED at the
-        bottom. Drag a project between bands to finish it or bring it back; drag
-        a bar to move it, or either edge to resize it, in whole working days.
-        Zoom from a day per column to a year on one screen.</p>
+        <p>One ranked list, with DONE and DROPPED at the bottom. Every project
+        carries a coloured band that fades as the list goes down, so the order
+        reads at a glance. Drag a project to reorder it, or onto a group to
+        finish it; drag a bar to move it, or either edge to resize it, in whole
+        working days. Zoom from a day per column to a year on one screen.</p>
       </div>
       <div class="card">
         <h3>Every project, in place</h3>
         <p>Status, deadlines, platforms, Jira/Confluence/Figma links,
         attachments of any type, milestones on the lane, and an action list with
         history. Every value reads as information and becomes an editor when
-        you ask it to — with an explicit Save, and a delete that always asks.</p>
+        you ask it to, with an explicit Save and a delete that always asks.</p>
       </div>
       <div class="card">
         <h3>The whole vault as one document</h3>
@@ -144,11 +144,11 @@
         card; a card whose block is missing is never deleted.</p>
       </div>
       <div class="card">
-        <h3>A phone that is not a shrunken desktop</h3>
+        <h3>A phone with its own interface</h3>
         <p>On a phone it is a list of project cards with the span, the
-        milestones and what is asking for attention — tap one and the project
-        takes the screen. Install it to the home screen and it opens in its own
-        window, with the colours it had when you left.</p>
+        milestones and what is asking for attention. Tap one and the project
+        takes the screen, notes first, with every value editable where it
+        stands.</p>
       </div>
     </div>
   </div>
@@ -164,7 +164,7 @@
     and a key the application has never heard of survives every save.</p>
 <pre><code># Navigation menu — second level
 - id: project-1-navigation-menu
-- tier: tier-1
+- priority: 1
 - status: active
 - timeline
   - start: 2026-08-24
@@ -200,7 +200,7 @@ Phase 1 shipped in June. This card only tracks phase 2.</code></pre>
 cd delivery-asap-hub
 python3 dashboard.py --vault sample-vault --port 8099</code></pre>
     <p>Open <code>http://localhost:8099</code>. That runs against the sample
-    vault — a fictional organisation used as the demo and as the test fixture.
+    vault, a fictional organisation used as the demo and as the test fixture.
     Point <code>settings.toml</code> at your own folder and run
     <code>python3 dashboard.py</code>. To reach it from your phone, bind it to
     your network and it will mint an access token for you.</p>
@@ -212,15 +212,15 @@ python3 dashboard.py --vault sample-vault --port 8099</code></pre>
     <p class="eyebrow">The model</p>
     <h2>Free, and that is the whole product.</h2>
     <p class="lead">Everything on this page is in the repository, under MIT, in
-    full, forever — not a trial, not a crippled tier, not a core with the useful
-    bits removed. <strong>If you can run a command, you never have to pay us
+    full, forever. There is no trial period, no reduced tier and no feature
+    held back. <strong>If you can run a command, you never have to pay us
     anything.</strong></p>
     <p class="lead" style="margin-top:14px">One day there may be a paid way to
-    have somebody else run it for you — a machine that is always on, with
-    backups and a URL that is there tomorrow morning — and a way for several
-    people to share one vault. Neither exists yet, and this page will not
-    pretend otherwise. When they do, the self-hosted version will be exactly
-    what it is today: complete.</p>
+    have somebody else run it for you: a machine that is always on, with
+    backups and a URL that is there tomorrow morning. There may also be a way
+    for several people to share one vault. Neither exists yet, and this page
+    will not pretend otherwise. When they do, the self-hosted version will be
+    exactly what it is today: complete.</p>
   </div>
 </section>
 
@@ -232,9 +232,9 @@ python3 dashboard.py --vault sample-vault --port 8099</code></pre>
       <details open>
         <summary>Is the free version actually the whole thing?</summary>
         <p>Yes. The repository is the product: the chart, the editing, the
-        markdown format, the phone, the snapshots. The paid plans do not unlock
-        features — they run the software for you, on hardware you do not have to
-        think about. If that is not worth money to you, it should not be.</p>
+        markdown format, the phone, the snapshots. What a paid plan would sell
+        is somebody running the software for you, on hardware you do not have
+        to think about.</p>
       </details>
       <details>
         <summary>Where is my data, exactly?</summary>
@@ -246,7 +246,7 @@ python3 dashboard.py --vault sample-vault --port 8099</code></pre>
       <details>
         <summary>Can you see any of it?</summary>
         <p>No. The self-hosted application makes no outbound request of any
-        kind — it has a content security policy that forbids one and no
+        kind: it has a content security policy that forbids one and no
         telemetry to send. On the hosted plan we would hold your files the way
         any host does, and you can leave with them at any time.</p>
       </details>
@@ -254,15 +254,14 @@ python3 dashboard.py --vault sample-vault --port 8099</code></pre>
         <summary>What if this project stops being maintained?</summary>
         <p>You keep a working copy of a program with no dependencies and no
         build step, and a vault of plain markdown that any editor can open. The
-        worst case is a folder of files that outlives the software — which is
-        the reason the format is what it is.</p>
+        worst case is a folder of files that outlives the software, which is
+        why the format is what it is.</p>
       </details>
       <details>
         <summary>Will it stay free once there is a paid plan?</summary>
         <p>The application stays exactly as it is: MIT, complete, self-hostable.
         Anything paid would be somebody running it for you, or several people
-        sharing one vault — never a feature taken out of the version you already
-        have.</p>
+        sharing one vault. Features already in your copy stay in it.</p>
       </details>
       <details>
         <summary>Why not just use a spreadsheet, or a tracker?</summary>

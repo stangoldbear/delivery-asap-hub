@@ -1,7 +1,6 @@
 # Expected delivery date on order status
 - id: project-10-delivery-estimate
 - type: project
-- tier: tier-3
 - priority: 11
 - status: done
 - intro: Surface the expected delivery date in the order status screen.

@@ -27,7 +27,7 @@ def ensure_list(value):
 
 
 def attrs(**data):
-    """Render `data-*` attributes from keyword arguments (underscores → dashes)."""
+    """Render `data-*` attributes from keyword arguments (underscores become dashes)."""
     return ''.join(f' data-{key.replace("_", "-")}="{esc(value)}"'
                    for key, value in data.items() if value is not None)
 
@@ -36,7 +36,7 @@ def select(select_id, options, current, param, css_class='form-input'):
     """A `<select>` whose current value is always representable.
 
     An out-of-vocabulary stored value is shown as a disabled option instead of
-    silently displaying the first choice — otherwise the next save would
+    silently displaying the first choice, because otherwise the next save would
     overwrite the real value with something the user never picked.
     """
     values = [value for value, _ in options]
@@ -89,10 +89,10 @@ _ICON_PATHS = {
             'a.9.9 0 0 1-1.2-1.2l4.6-4.6"/>',
     # Open, and rotated 90° by CSS when it is closed. It used to be the text
     # glyphs ▲ and ►, which iOS renders from a fallback font with metrics of
-    # its own — they arrived on the phone stretched flat.
+    # its own: they arrived on the phone stretched flat.
     'caret': '<path d="M4 10.5 8 6.5l4 4"/>',
     # Three depths, one glyph each: how far down the chart is unfolded.
-    'level-groups': '<path d="M2.5 8h11"/>',
+    'level-compact': '<path d="M2.5 8h11"/>',
     'level-projects': '<path d="M2.5 5.5h11M6 10.5h7.5"/>',
     'level-people': '<path d="M2.5 3.5h11M6 8h7.5M9.5 12.5h4"/>',
     'level-details': '<path d="M2.5 2.5h11M5.5 6h8M8.5 9.5h5M11 13h2.5"/>',
@@ -113,7 +113,7 @@ def icon(name, extra_class=''):
 
 
 # ─── Minimal markdown ────────────────────────────────────────────────────────
-# Free text typed into a card — an intro, a note — is markdown, and this is the
+# Free text typed into a card, an intro or a note, is markdown, and this is the
 # subset that earns its place: headings, lists, bold, italic, code and links.
 #
 # ORDER MATTERS AND IS THE SAFETY PROPERTY: the text is escaped first and only

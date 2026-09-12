@@ -1,16 +1,19 @@
 """
-Gantt chart rendering: header, tier rows, project rows, resource rows.
+Gantt chart rendering: header, group rows, project rows, resource rows.
 
-Geometry and colours come from `domain`; layout metrics travel as CSS custom
-properties, so the stylesheet and the resize script never restate them.
+Geometry comes from `domain`; layout metrics travel as CSS custom properties,
+so the stylesheet and the resize script never restate them.
 
-A tier reaches the markup as one custom property, `--tier`, set on the row: the
-stylesheet decides how much of it to spend (a rail and a marker), and the
+Rank reaches the markup as one custom property, `--at`: how far down the
+priority ramp the row sits, as a percentage. The two ends of that ramp are
+theme tokens the browser resolves, so no colour is computed here: the
+stylesheet decides how much of it to spend (a rail and a tint), and the
 timeline lane beside it never takes it at all.
 """
 
 from . import settings as settings_module
 from .domain import (
+    band_position,
     format_date_long,
     group_by_display,
     group_color,
@@ -20,9 +23,6 @@ from .domain import (
     project_milestones,
     project_span,
     project_tasks,
-    summary_bar_color,
-    tier_color,
-    tier_key,
 )
 from .markup import attrs, esc, icon
 
@@ -36,7 +36,7 @@ def render(projects, timeline, *, detail_row, settings=None):
     The whole chart as one `<table>`.
 
     Every bar comes from the card that owns it: the chart asks a project for
-    its span and its rows and draws them. `detail_row(project, tier)` is
+    its span and its rows and draws them. `detail_row(project, group, at)` is
     injected, so the chart places the expandable panel but knows nothing about
     its contents.
     """
@@ -47,14 +47,18 @@ def render(projects, timeline, *, detail_row, settings=None):
 
     for group in group_order(config):
         members = grouped.get(group, [])
-        # An empty tier is not drawn; DONE and DROPPED always are, because a
-        # project is finished by being dragged onto them.
-        if not members and not is_display_group(group):
-            continue
+        # The live list is the chart and carries no heading of its own. DONE and
+        # DROPPED always get one, even with nothing under it, because dropping a
+        # project onto that heading is how it gets there.
+        closed = is_display_group(group)
+        if closed:
+            parts.append(_group_header(group, len(members), config))
 
-        parts.append(_group_header(group, len(members), config))
-        for project in members:
-            parts.extend(_project_block(project, group, timeline, detail_row, config))
+        for index, project in enumerate(members):
+            # A finished project has no rank left to show: it takes the cold end
+            # of the ramp, where a live project in last place would sit.
+            at = 100.0 if closed else band_position(index, len(members))
+            parts.extend(_project_block(project, group, at, timeline, detail_row, config))
 
     parts.append('</tbody></table></div>')
     return '\n'.join(parts)
@@ -82,7 +86,7 @@ def _day_classes(day, timeline):
 
 
 def _header(timeline, config):
-    # A month gets its year back only when there is room to print it — and when
+    # A month gets its year back only when there is room to print it, and when
     # there is not, the year is not dropped but promoted to a row of its own:
     # zoomed out is exactly where a chart crosses a new year.
     wide = timeline.col_width >= settings_module.COL_W / 2
@@ -112,6 +116,16 @@ def _header(timeline, config):
         f'{esc(config.weekday_initials[day.weekday()])}</div>'
         for day in timeline.days
     )
+    # Built before the document below, not inside it: an f-string expression
+    # holding another f-string of the same quote only parses on Python 3.12,
+    # and the stated floor is 3.11.
+    year_row = f'''<tr class="year-row">
+      <th class="label-head sticky-col"></th>
+      <th class="timeline-head">
+        <div class="timeline-strip">{years}</div>
+      </th>
+    </tr>''' if years else ''
+
     today_index = timeline.today_index
     band = ''
     if today_index is not None:
@@ -130,12 +144,7 @@ def _header(timeline, config):
     <col class="timeline-col">
   </colgroup>
   <thead>
-    {f'''<tr class="year-row">
-      <th class="label-head sticky-col"></th>
-      <th class="timeline-head">
-        <div class="timeline-strip">{years}</div>
-      </th>
-    </tr>''' if years else ''}
+    {year_row}
     <tr>
       <th class="label-head sticky-col">
         <div class="label-head__title">Project &amp; assigned resources</div>
@@ -165,7 +174,7 @@ def _grid_lines(timeline):
     Where a week and a month begin, drawn down the whole chart.
 
     The day grid is a repeating gradient on every lane, which cannot know when
-    a month changes — months have different numbers of working days. These two
+    a month changes, because months have different numbers of working days. These two
     are positioned once, here, from the scale itself.
     """
     lines, previous = [], None
@@ -186,27 +195,26 @@ def _grid_lines(timeline):
 
 def _group_header(group, count, config):
     title = group_title(group, config)
-    return f'''<tr class="tier-row" data-group="{esc(group)}" style="--tier:{group_color(group, config)}">
-  <td class="sticky-col tier-row__cell">
-    <div class="tier-row__inner">
+    return f'''<tr class="group-row" data-group="{esc(group)}" style="--marker:{group_color(group, config)}">
+  <td class="sticky-col group-row__cell">
+    <div class="group-row__inner">
       <button type="button" class="btn btn--ghost btn--sm btn--icon" id="btn-group-{esc(group)}" data-action="toggle-group" data-group="{esc(group)}" title="Collapse or expand this group" aria-label="Collapse or expand {esc(title)}">{caret()}</button>
-      <span class="tier-row__marker"></span>
-      <span class="tier-row__title">{esc(title)}</span>
+      <span class="group-row__marker"></span>
+      <span class="group-row__title">{esc(title)}</span>
       <span class="badge">{count}</span>
     </div>
   </td>
-  <td class="tier-row__band"></td>
+  <td class="group-row__band"></td>
 </tr>'''
 
 
-def _project_block(project, group, timeline, detail_row, config):
+def _project_block(project, group, at, timeline, detail_row, config):
     rows_of_project = project_tasks(project, config)
-    rail = tier_color(tier_key(project, config), config)
 
-    rows = [_project_row(project, group, rows_of_project, timeline, config)]
-    rows.extend(_resource_row(project['id'], group, rail, task, timeline, config)
+    rows = [_project_row(project, group, at, rows_of_project, timeline, config)]
+    rows.extend(_resource_row(project['id'], group, at, task, timeline, config)
                 for task in rows_of_project)
-    rows.append(detail_row(project, group))
+    rows.append(detail_row(project, group, at))
     return rows
 
 
@@ -219,7 +227,10 @@ def _summary_bar(project, timeline, status, config):
     if not geometry:
         return ''
     left, width = geometry
-    fill = summary_bar_color(tier_key(project, config), status, config)
+    # Blocked is a signal and outranks the rank: it floods the bar. Every other
+    # project takes the rail its position already earned, resolved by the
+    # stylesheet rather than named here.
+    fill = settings_module.BLOCKED_COLOR if status == 'blocked' else 'var(--rail)'
     blocked = ' summary-bar--blocked' if status == 'blocked' else ''
     span = (f'{format_date_long(start, config)} → {format_date_long(end, config)}')
     return (f'<div class="task-bar summary-bar{blocked}" style="left:{left}px;width:{width}px;'
@@ -228,7 +239,7 @@ def _summary_bar(project, timeline, status, config):
             f'data-end="{end.strftime("%Y-%m-%d")}">{_grips()}</div>')
 
 
-def _project_row(project, group, rows_of_project, timeline, config):
+def _project_row(project, group, at, rows_of_project, timeline, config):
     project_id = project['id']
     name = project.get('name', project_id)
     status = str(project.get('status', 'active')).lower()
@@ -252,8 +263,8 @@ def _project_row(project, group, rows_of_project, timeline, config):
 
     # One line: identity, then the two things that change (status, deadline),
     # then the row actions, which only appear on hover or keyboard focus.
-    # The platform tags left the chart entirely — the detail panel lists them.
-    return f'''<tr class="project-main-row" data-group-child="{esc(group)}" data-proj-id="{esc(project_id)}" style="--tier:{tier_color(tier_key(project, config), config)}" draggable="true">
+    # The platform tags left the chart entirely; the detail panel lists them.
+    return f'''<tr class="project-main-row" data-group-child="{esc(group)}" data-proj-id="{esc(project_id)}" data-status="{esc(status)}" style="--at:{at:.2f}%" draggable="true">
   <td class="sticky-col project-cell">
     <div class="project-line project-line--head">
       <div class="project-identity">
@@ -317,7 +328,7 @@ def _warning(condition, message):
             f'aria-label="{esc(message)}">{icon("warning")}</span>')
 
 
-def _resource_row(project_id, group, rail, task, timeline, config):
+def _resource_row(project_id, group, at, task, timeline, config):
     geometry = timeline.geometry(task['start'], task['end'])
     if not geometry:
         return ''
@@ -335,7 +346,7 @@ def _resource_row(project_id, group, rail, task, timeline, config):
            f'data-end="{task["end"].strftime("%Y-%m-%d")}">'
            f'<span class="bar-text">{esc(task["who"])}</span>{_grips()}</div>')
 
-    return f'''<tr class="resource-sub-row" data-group-child="{esc(group)}" data-proj-child="{esc(project_id)}" style="--tier:{rail}">
+    return f'''<tr class="resource-sub-row" data-group-child="{esc(group)}" data-proj-child="{esc(project_id)}" style="--at:{at:.2f}%">
   <td class="sticky-col resource-cell">
     <div class="resource-line" role="button" tabindex="0" title="Click to edit this row" data-action="row-open"{attrs(project=project_id, task=task['id'], who=task['who'], note=task['note'])} data-start="{task['start'].strftime('%Y-%m-%d')}" data-end="{task['end'].strftime('%Y-%m-%d')}">
       <span class="resource-line__branch">└─</span>

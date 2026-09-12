@@ -1,13 +1,13 @@
 """
 Deployment settings and presentation constants.
 
-`settings.toml` holds everything an organisation changes (tiers, squads,
+`settings.toml` holds everything an organisation changes (squads, roles,
 project codes, links, wording); this module parses it once, fails fast on a
 malformed file, and exposes it as a frozen `Settings` value.
 
 Composition root: `configure()` is called once by the entry point. Modules read
 the result through `current()`. A single process-wide value is a deliberate
-simplification for a single-tenant local tool — tests call `configure()` with
+simplification for a single-tenant local tool; tests call `configure()` with
 their own fixture path.
 """
 
@@ -37,8 +37,11 @@ STATUS_STYLES = {
 STATUS_FALLBACK = {'bg': '#f5f5f5', 'fg': '#555555'}
 STATUS_OPTIONS = list(STATUS_STYLES)
 
-# Two display groups, drawn under the tiers. They are not tiers: a project
-# lands in one because of its status, and keeps the tier it belongs to.
+# The live list has no heading of its own: it is simply the chart. The two
+# groups below it are drawn under one each, and a project lands in one because
+# of its status alone. Dropping a project onto a heading is what sets it.
+LIVE_GROUP = 'live'
+LIVE_GROUP_TITLE = 'IN FLIGHT'
 DONE_GROUP, DROPPED_GROUP = 'done', 'dropped'
 DISPLAY_GROUPS = {
     DONE_GROUP:    {'title': 'DONE', 'rgb': (0, 105, 92)},
@@ -67,7 +70,7 @@ COL_W = 17           # day column width in px
 LABEL_W = 340        # sticky left column, initial width
 LABEL_W_MIN = 160    # drag limits for the sticky column
 LABEL_W_MAX = 900
-# How wide one working day is drawn, per zoom level. A column is always a day —
+# How wide one working day is drawn, per zoom level. A column is always a day,
 # what changes is how many of them fit, and therefore what the header can say.
 ZOOM_LEVELS = {'day': COL_W, 'week': 6, 'month': 2}
 # How far ahead the scale runs when the window has not said where to stop.
@@ -79,6 +82,7 @@ ZOOM_HORIZON = {'day': 0, 'week': 190, 'month': 760}
 DEFAULT_ZOOM = 'day'
 
 ROW_H = 34           # project row (one line: identity, signals, actions)
+COMPACT_ROW_H = 22   # the same row at the Compact level: rank, name, span
 SUB_ROW_H = 20       # resource row
 
 
@@ -106,8 +110,6 @@ class Settings:
     months: tuple
     month_abbr: tuple
     weekday_initials: tuple
-    tiers: dict            # key -> {'title': str, 'rgb': (r, g, b)}
-    default_tier: str
     platforms: tuple
     roles: tuple           # ({'key','label','color','keywords'}, ...)
     fallback_role: dict
@@ -132,6 +134,7 @@ class Settings:
             '--label-w-min': f'{LABEL_W_MIN}px',
             '--label-w-max': f'{LABEL_W_MAX}px',
             '--row-h': f'{ROW_H}px',
+            '--compact-row-h': f'{COMPACT_ROW_H}px',
             '--sub-row-h': f'{SUB_ROW_H}px',
         }
 
@@ -169,24 +172,6 @@ def _parse(raw, source):
     links = raw.get('links', {})
     locale = raw.get('locale', {})
     defaults = raw.get('defaults', {})
-
-    tiers_raw = raw.get('tiers') or []
-    if not tiers_raw:
-        raise SettingsError(f'{source}: at least one [[tiers]] entry is required.')
-
-    tiers = {}
-    for entry in tiers_raw:
-        key = _require(entry, 'key', 'tiers')
-        if key in tiers:
-            raise SettingsError(f'{source}: duplicate tier key `{key}`.')
-        rgb = _require(entry, 'rgb', f'tiers.{key}')
-        if len(rgb) != 3 or not all(isinstance(c, int) and 0 <= c <= 255 for c in rgb):
-            raise SettingsError(f'{source}: tier `{key}` rgb must be three ints 0-255.')
-        tiers[key] = {'title': _require(entry, 'title', f'tiers.{key}'), 'rgb': tuple(rgb)}
-
-    default_tier = defaults.get('tier', next(iter(tiers)))
-    if default_tier not in tiers:
-        raise SettingsError(f'{source}: defaults.tier `{default_tier}` is not a declared tier.')
 
     roles = tuple(
         {
@@ -252,8 +237,6 @@ def _parse(raw, source):
         months=months,
         month_abbr=month_abbr,
         weekday_initials=weekday_initials,
-        tiers=tiers,
-        default_tier=default_tier,
         platforms=tuple(defaults.get('platforms', ())),
         roles=roles,
         fallback_role=dict(defaults.get('fallback_role', {'label': 'Member', 'color': '#78909c'})),
@@ -268,14 +251,14 @@ def _read_toml(path):
     except FileNotFoundError:
         raise SettingsError(f'Settings file not found: {path}')
     except tomllib.TOMLDecodeError as exc:
-        raise SettingsError(f'{path}: invalid TOML — {exc}')
+        raise SettingsError(f'{path}: invalid TOML: {exc}')
 
 
 def _overlay(base, override):
     """
     Merge one settings mapping over another, table by table.
 
-    Only tables merge. A list — the tiers, the roles, the squads — is replaced
+    Only tables merge. A list (the roles, the squads) is replaced
     whole: half of one roster grafted onto half of another is nobody's idea of
     an override.
     """

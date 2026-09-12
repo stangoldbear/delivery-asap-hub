@@ -13,20 +13,20 @@ from . import gantt, settings as settings_module
 from .domain import (
     RANGES,
     Timeline,
+    band_position,
     chart_spans,
-    project_milestones,
     format_date_long,
     format_relative,
     group_by_display,
     group_color,
     group_order,
     group_title,
+    is_display_group,
+    project_milestones,
     project_span,
     project_tasks,
     resolve_range,
     resolve_zoom,
-    tier_color,
-    tier_key,
 )
 from .cardmd import NOTES_HEADING
 from .gantt import caret
@@ -164,7 +164,7 @@ def _attachment_rows(project_id, attachments):
 
 
 # ─── Project detail panel ────────────────────────────────────────────────────
-def render_detail_row(project, group, settings=None):
+def render_detail_row(project, group, at=100.0, settings=None):
     config = settings or settings_module.current()
     project_id = project['id']
     name = project.get('name', project_id)
@@ -248,7 +248,7 @@ def render_detail_row(project, group, settings=None):
              'No general information yet. Double-click to add some.</span>'
     )
 
-    return f'''<tr class="detail-row" data-detail-group="{esc(group)}" data-proj-id="{esc(project_id)}" id="detail-panel-{esc(project_id)}" style="display:none;--tier:{tier_color(tier_key(project, config), config)}">
+    return f'''<tr class="detail-row" data-detail-group="{esc(group)}" data-proj-id="{esc(project_id)}" id="detail-panel-{esc(project_id)}" style="display:none;--at:{at:.2f}%">
   <td colspan="2" class="detail-cell">
     <div class="detail-panel-wrapper">
       <div class="detail-panel-box">
@@ -379,41 +379,32 @@ def render_detail_row(project, group, settings=None):
 # ─── Aggregated to-do view ───────────────────────────────────────────────────
 def render_global_todos(projects, settings=None):
     """
-    Open actions, by tier.
+    Open actions, in priority order.
 
     Finished and abandoned work is left out: it should not keep asking for
     attention. Its notes stay readable in its own panel.
     """
     config = settings or settings_module.current()
-    grouped = group_by_display(projects, config)
-    blocks, total_active, total_done = [], 0, 0
+    live = group_by_display(projects, config).get(settings_module.LIVE_GROUP, [])
+    cards, total_active, total_done = [], 0, 0
 
-    for tier in config.tiers:
-        cards = []
-        for project in grouped.get(tier, []):
-            todos = project.get('todos') or []
-            history = project.get('done') or []
-            total_active += len(todos)
-            total_done += len(history)
-            if todos or history:
-                cards.append(_todo_card(project, tier, todos, history, config))
+    for index, project in enumerate(live):
+        todos = project.get('todos') or []
+        history = project.get('done') or []
+        total_active += len(todos)
+        total_done += len(history)
+        if todos or history:
+            cards.append(_todo_card(project, band_position(index, len(live)),
+                                    todos, history, config))
 
-        if cards:
-            blocks.append(
-                f'<div class="tier-group">'
-                f'<h4><span class="tier-group__marker" style="background:{tier_color(tier, config)}">'
-                f'</span>{esc(group_title(tier, config))}</h4>'
-                f'{"".join(cards)}</div>'
-            )
-
-    if not blocks:
+    if not cards:
         return ('<div class="todo-empty">No note or action found in the vault.</div>',
                 total_active, total_done)
 
-    return ''.join(blocks), total_active, total_done
+    return ''.join(cards), total_active, total_done
 
 
-def _todo_card(project, tier, todos, history, config):
+def _todo_card(project, at, todos, history, config):
     project_id = project['id']
     name = project.get('name', project_id)
     sections = ''
@@ -432,7 +423,7 @@ def _todo_card(project, tier, todos, history, config):
                                   dom_prefix='global-todo-row', empty_label='')
                      + '</div>')
 
-    return f'''<div class="global-todo-card" style="border-left:3px solid {tier_color(tier, config)}">
+    return f'''<div class="global-todo-card" style="--at:{at:.2f}%">
   <div class="global-todo-card__head" data-card="{esc(project_id)}">
     <strong class="global-todo-card__title" title="{esc(project_id)}">{esc(name)}</strong>
     <button type="button" class="btn btn--ghost btn--sm" data-action="toggle-detail" data-project="{esc(project_id)}">{icon('panel')}Notes &amp; actions</button>
@@ -443,9 +434,9 @@ def _todo_card(project, tier, todos, history, config):
 
 # ─── Toolbar ─────────────────────────────────────────────────────────────────
 _DEPTH_LEVELS = (
-    ('groups', 'Groups', 'Show groups only'),
-    ('projects', 'Projects', 'Show groups and projects'),
-    ('people', 'Stakeholders', 'Show groups, projects and stakeholders'),
+    ('compact', 'Compact', 'One line per project: the order, the name and its span'),
+    ('projects', 'Projects', 'Every project with its status and deadline'),
+    ('people', 'Stakeholders', 'Every project and the people on it'),
     ('details', 'All details', 'Show everything, including the notes and actions '
                                'of every project'),
 )
@@ -464,6 +455,10 @@ def _depth_switch():
     A toggle answers "what is it now?", which is the one thing a toolbar cannot
     know when half the chart is collapsed and half is not. A level is absolute:
     it always means the same thing and always does it.
+
+    Compact is the stylesheet's job alone: the rows keep every attribute they
+    have, and a root attribute tells the chart to stop drawing what a ranked
+    reading does not need. No second markup, no second state.
     """
     buttons = ''.join(
         f'<button type="button" class="tab" data-action="depth" data-depth="{key}" '
@@ -584,17 +579,44 @@ def _shell(config, *, timeline, header_side, content, overlays='', zoom=''):
       </section>
 
       <section class="settings-group">
+        <h4 class="settings-group__title">Priority band</h4>
+        <p class="settings-group__note">Every project carries a band down its left
+          edge: full colour at the top of the list, fading to grey at the bottom.
+          The shade is worked out against whichever theme is on.</p>
+        <div class="settings-presets" id="band-presets"></div>
+        <label class="settings-range">
+          <span class="settings-range__label">Colour</span>
+          <input type="range" id="band-hue" class="hue-track" min="0" max="359"
+                 data-change="band" data-band="hue" aria-label="Band colour">
+          <output class="settings-range__value" id="band-hue-out"></output>
+        </label>
+        <label class="settings-range">
+          <span class="settings-range__label">Intensity</span>
+          <input type="range" id="band-sat" min="0" max="95"
+                 data-change="band" data-band="sat" aria-label="Band intensity">
+          <output class="settings-range__value" id="band-sat-out"></output>
+        </label>
+        <label class="settings-range">
+          <span class="settings-range__label">Fade</span>
+          <input type="range" id="band-fade" min="12" max="45"
+                 data-change="band" data-band="fade" aria-label="How far the last band fades">
+          <output class="settings-range__value" id="band-fade-out"></output>
+        </label>
+        <label class="settings-range">
+          <span class="settings-range__label">Tint</span>
+          <input type="range" id="band-tint" min="0" max="40"
+                 data-change="band" data-band="tint" aria-label="How much the band tints the row">
+          <output class="settings-range__value" id="band-tint-out"></output>
+        </label>
+        <label class="settings-option">
+          <input type="checkbox" data-change="preference" data-pref="blockedTitle">
+          <span class="settings-option__text">Blocked colours the project title
+            <span class="settings-option__hint">A blocked project reads red in the list, not only on its pill.</span></span>
+        </label>
+      </section>
+
+      <section class="settings-group">
         <h4 class="settings-group__title">The chart</h4>
-        <label class="settings-option">
-          <input type="checkbox" data-change="preference" data-pref="tiers">
-          <span class="settings-option__text">Tier bands
-            <span class="settings-option__hint">The group headings the projects are filed under.</span></span>
-        </label>
-        <label class="settings-option">
-          <input type="checkbox" data-change="preference" data-pref="rails">
-          <span class="settings-option__text">Tier colours
-            <span class="settings-option__hint">The coloured line down the left of every row.</span></span>
-        </label>
         <label class="settings-option">
           <input type="checkbox" data-change="preference" data-pref="weekdays">
           <span class="settings-option__text">Weekday initials
@@ -667,7 +689,7 @@ def render_page(projects, *, window='', zoom='', today=None, settings=None):
                         today=today, start_from=start_from, end_at=end_at,
                         horizon=settings_module.ZOOM_HORIZON.get(zoom_key, 0))
     chart = gantt.render(projects, timeline,
-                         detail_row=lambda project, group: render_detail_row(project, group, config),
+                         detail_row=lambda project, group, at: render_detail_row(project, group, at, config),
                          settings=config)
     todos_html, active_count, done_count = render_global_todos(projects, config)
 
@@ -740,7 +762,7 @@ def _sparkline(project, timeline, settings):
     The project's span against the whole scale, with today and its milestones.
 
     A phone cannot show a chart, but it can show where one project sits in the
-    year — which is the only thing a card needs from the timeline.
+    year, which is the only thing a card needs from the timeline.
     """
     if not timeline.width:
         return ''
@@ -772,7 +794,7 @@ def _sparkline(project, timeline, settings):
     return f'<span class="spark">{bar}{marks}{today}</span>'
 
 
-def _project_card(project, timeline, settings, today):
+def _project_card(project, at, timeline, settings, today):
     project_id = project['id']
     status = str(project.get('status', 'active')).lower()
     style = settings_module.STATUS_STYLES.get(status, settings_module.STATUS_FALLBACK)
@@ -798,7 +820,7 @@ def _project_card(project, timeline, settings, today):
     notes = (f'<span class="pcard__notes">{len(todos)} note'
              f'{"" if len(todos) == 1 else "s"}</span>') if todos else ''
 
-    return f'''<button type="button" class="pcard" data-action="open-project" aria-expanded="false" data-project="{esc(project_id)}" style="--tier:{tier_color(tier_key(project, settings), settings)}">
+    return f'''<button type="button" class="pcard" data-action="open-project" aria-expanded="false" data-project="{esc(project_id)}" data-status="{esc(status)}" style="--at:{at:.2f}%">
   <span class="pcard__head">
     <span class="prio-badge">{esc(project.get('priority', ''))}</span>
     <span class="pcard__name">{esc(project.get('name', project_id))}</span>
@@ -816,7 +838,7 @@ def _project_card(project, timeline, settings, today):
 
 
 def _project_list(projects, timeline, settings, today):
-    """Every project as a card, in the bands the chart draws them in."""
+    """Every project as a card: the ranked list, then DONE and DROPPED."""
     grouped = group_by_display(projects, settings)
     blocks = []
 
@@ -824,15 +846,19 @@ def _project_list(projects, timeline, settings, today):
         members = grouped.get(group, [])
         if not members:
             continue
-        cards = ''.join(_project_card(project, timeline, settings, today)
-                        for project in members)
-        blocks.append(
-            f'<section class="plist__group">'
+        closed = is_display_group(group)
+        cards = ''.join(
+            _project_card(project, 100.0 if closed else band_position(index, len(members)),
+                          timeline, settings, today)
+            for index, project in enumerate(members))
+        # The live list needs no heading: it is the page. The two below it do,
+        # because the eye has to know where the work stops being current.
+        heading = '' if not closed else (
             f'<h3 class="plist__title">'
-            f'<span class="tier-row__marker" style="background:{group_color(group, settings)}">'
+            f'<span class="group-row__marker" style="background:{group_color(group, settings)}">'
             f'</span>{esc(group_title(group, settings))}'
-            f'<span class="badge">{len(members)}</span></h3>'
-            f'{cards}</section>')
+            f'<span class="badge">{len(members)}</span></h3>')
+        blocks.append(f'<section class="plist__group">{heading}{cards}</section>')
 
     body = ''.join(blocks) or '<div class="todo-empty">No project card in the vault.</div>'
     return f'''<div class="plist" data-surface="projects">
@@ -886,17 +912,17 @@ def _entry_tree(value):
 
 
 def _tree(projects, settings):
-    """The hierarchy as a list: group → project → everything the card says."""
+    """The hierarchy as a list: project → everything the card says, ranked."""
     grouped = group_by_display(projects, settings)
     blocks = []
 
-    for tier in group_order(settings):
-        tier_projects = grouped.get(tier, [])
-        if not tier_projects:
+    for group in group_order(settings):
+        members = grouped.get(group, [])
+        if not members:
             continue
 
         items = []
-        for project in tier_projects:
+        for project in members:
             span = project_span(project, settings)
             when = (f'{format_date_long(span[0], settings)} → '
                     f'{format_date_long(span[1], settings)}') if span else 'no span declared'
@@ -921,11 +947,16 @@ def _tree(projects, settings):
                 f'</summary>'
                 f'{fields}</details></li>')
 
-        blocks.append(
-            f'<li class="tree__tier">'
-            f'<span class="tier-row__marker" style="background:{group_color(tier, settings)}"></span>'
-            f'{esc(group_title(tier, settings))} <span class="badge">{len(tier_projects)}</span>'
-            f'<ul>{"".join(items)}</ul></li>')
+        # The live list is the tree; only a closing group announces itself.
+        if is_display_group(group):
+            blocks.append(
+                f'<li class="tree__group">'
+                f'<span class="group-row__marker" style="background:{group_color(group, settings)}">'
+                f'</span>{esc(group_title(group, settings))} '
+                f'<span class="badge">{len(members)}</span>'
+                f'<ul>{"".join(items)}</ul></li>')
+        else:
+            blocks.append(''.join(items))
 
     return f'<ul class="tree">{"".join(blocks)}</ul>' if blocks else (
         '<div class="todo-empty">No project card in the vault.</div>')
@@ -935,7 +966,7 @@ def render_hierarchy_page(projects, markdown, *, settings=None):
     """
     Two readings of the same vault: the structure, and the text behind it.
 
-    The markdown tab is every card in one editable document — the monthly
+    The markdown tab is every card in one editable document: the monthly
     snapshot, and the way to edit many cards at once.
     """
     config = settings or settings_module.current()
@@ -951,7 +982,7 @@ def render_hierarchy_page(projects, markdown, *, settings=None):
     <div id="view-markdown" class="view-panel" hidden>
       <p class="view-hint">Every card, in the order the chart draws them. A block
       with an unknown <code>- id:</code> creates a card; a card whose block is not
-      here is left alone — nothing is ever deleted from this screen.</p>
+      here is left alone. Nothing is ever deleted from this screen.</p>
       <textarea id="vault-markdown" class="advedit-raw-textarea" spellcheck="false" aria-label="Every card as one markdown document">{esc(markdown)}</textarea>
       <div class="view-actions">
         <button type="button" class="btn btn--default btn--sm" data-action="vault-markdown-save">Save all</button>

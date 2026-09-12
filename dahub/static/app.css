@@ -1,14 +1,15 @@
 /* ============================================================================
-   Delivery ASAP hub — stylesheet
+   Delivery ASAP hub: stylesheet
    Static file served from /static/app.css: no Python escaping involved.
 
    The vocabulary is shadcn/ui, ported by hand: its tokens, its radius and the
    anatomy of the handful of components this app uses. No React, no Tailwind,
-   no build step — only the vocabulary.
+   no build step, only the vocabulary.
 
    Two rules the rest of the file obeys:
    1. Colour is spent on signals (blocked, today, a deadline), never on a
-      category something merely belongs to. A tier gets a rail, not a flood.
+      category something merely belongs to. Rank gets a rail and a wash, not
+      a flood, and it is deliberately not red: red means blocked.
    2. Every colour comes from a token. Light and dark differ by the token
       block below and by nothing else.
 
@@ -238,16 +239,10 @@ textarea { width: 100%; resize: vertical; line-height: 1.5; padding: 8px; }
   display: flex; align-items: center; gap: 8px;
 }
 .global-todos-content { padding: 14px; background: hsl(var(--background)); }
-.tier-group { margin-bottom: 16px; }
-.tier-group h4 {
-  font-size: 11px; font-weight: 600; margin-bottom: 8px;
-  text-transform: uppercase; letter-spacing: .06em;
-  color: hsl(var(--muted-foreground));
-  display: flex; align-items: center; gap: 6px;
-}
-.tier-group__marker { width: 8px; height: 8px; border-radius: 2px; flex: none; }
 .global-todo-card {
   background: hsl(var(--card)); border: 1px solid hsl(var(--border));
+  /* After the shorthand, or the shorthand resets it. */
+  border-left: 3px solid var(--rail, transparent);
   border-radius: calc(var(--radius) - 2px);
   padding: 10px 12px; margin-bottom: 8px;
 }
@@ -265,7 +260,7 @@ textarea { width: 100%; resize: vertical; line-height: 1.5; padding: 8px; }
 /* ─── Chart ───────────────────────────────────────────────────────────────── */
 /* The middle of the app shell: pinned to the top of the window, as tall as
    what is left of it once the footer has its line, and a column so the chart
-   takes whatever the toolbar does not — the toolbar wraps at narrow widths and
+   takes whatever the toolbar does not: the toolbar wraps at narrow widths and
    a hard-coded height would put the last rows under the footer. */
 .gantt-box {
   /* The panel inside measures itself against this box, not against the window:
@@ -305,7 +300,7 @@ mark {
 /* The chart is a viewport of its own: it scrolls in both directions inside a
    box pinned to the top of the window, which is the only arrangement that
    keeps the calendar in view while the rows scroll under it. A table cannot
-   stick its header to the window from inside a horizontal scroller —
+   stick its header to the window from inside a horizontal scroller,
    scrolling one axis makes the element the scrollport for both. */
 .gantt-scroll {
   overflow: auto; position: relative;
@@ -406,7 +401,7 @@ mark {
   position: absolute; top: 0; bottom: 0; left: var(--label-w); right: 0;
   pointer-events: none;
   /* Behind the bars: it comes before the table in the document, so with no
-     stacking of its own the bars — positioned, and later — paint over it. */
+     stacking of its own, the bars (positioned, and later) paint over it. */
   z-index: 0;
 }
 .grid-line { position: absolute; top: 0; bottom: 0; }
@@ -423,7 +418,7 @@ mark {
 
 /* Two soft edges that say the chart continues that way. The left one is the
    shadow the frozen column casts once something is hidden behind it; the right
-   one is there for as long as there is more timeline — which is the part a
+   one is there for as long as there is more timeline, which is the part a
    person needs *before* they try, and the reason it is not only a scrollbar.
    Both are drawn from a sticky, zero-height anchor, the trick the resize
    handle already uses to span a table it does not scroll with. */
@@ -433,7 +428,7 @@ mark {
      chart: the panels. Rather than cut the strip up, it sits at the same
      depth as a panel's cell and earlier in the document, so every opaque
      panel paints over it. Above the grid and the band, under the frozen
-     column and the calendar — which keep their own edges. */
+     column and the calendar, which keep their own edges. */
   z-index: 2;
 }
 .scroll-shade {
@@ -469,29 +464,50 @@ body.col-resize-active { cursor: col-resize; user-select: none; }
   text-transform: uppercase; letter-spacing: .06em; color: hsl(var(--muted-foreground));
 }
 
-/* ─── Tier row ───────────────────────────────────────────────────────────────
-   A tier is a stable property, not a signal: it gets a rail and an 8px marker,
-   and the timeline lane beside it stays neutral. */
-/* `.sticky-col` paints the card colour on every label cell; the tier band is
-   the one row where the label has to match the band beside it. */
-.tier-row > td, .gantt-table .tier-row .sticky-col { background: hsl(var(--muted)); }
-.tier-row__cell { padding: 0; border-left: 3px solid var(--tier, transparent); }
-.tier-row__inner {
+/* ─── The priority ramp ──────────────────────────────────────────────────────
+   Every row that belongs to a project carries `--at`: how far down the ranked
+   list it sits. `--band` and `--band-end` are set on :root by theme.js, which
+   solves them against whichever theme is on. One rule turns the three into a
+   colour; nothing else in this file mixes it again.
+
+   The rail is that colour at full strength. The label cell behind it takes the
+   same colour at `--band-tint`, which is a wash and must stay one: the title
+   has to keep reading at AA over it. The timeline lane never takes either. */
+[style*="--at:"] {
+  --rail: color-mix(in oklab, hsl(var(--band-end)) var(--at), hsl(var(--band)));
+}
+
+/* ─── Group row: DONE and DROPPED, the only two headings left ──────────────── */
+/* `.sticky-col` paints the card colour on every label cell; a heading is the
+   one row where the label has to match the band beside it. */
+.group-row > td, .gantt-table .group-row .sticky-col { background: hsl(var(--muted)); }
+.group-row__cell { padding: 0; border-left: 3px solid var(--marker, transparent); }
+.group-row__inner {
   display: flex; align-items: center; gap: 8px; padding: 4px 10px;
   font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
 }
-.tier-row__marker { width: 8px; height: 8px; border-radius: 2px; flex: none; background: var(--tier); }
-.tier-row__title {
+.group-row__marker { width: 8px; height: 8px; border-radius: 2px; flex: none; background: var(--marker); }
+.group-row__title {
   flex: 1 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.tier-row__band { padding: 0; }
+.group-row__band { padding: 0; }
 
 /* ─── Project row ─────────────────────────────────────────────────────────── */
-.project-cell { padding: 5px 8px; border-left: 3px solid var(--tier, transparent); }
+.project-cell {
+  padding: 5px 8px;
+  border-left: 3px solid var(--rail, transparent);
+  background: color-mix(in srgb, var(--rail) var(--band-tint), hsl(var(--card)));
+}
+/* Blocked is the one signal loud enough to reach the title. Optional, because
+   the pill says it too, and one of them is always on. */
+:root[data-blocked-title] .project-main-row[data-status="blocked"] .project-title,
+:root[data-blocked-title] .pcard[data-status="blocked"] .pcard__name {
+  color: hsl(var(--destructive));
+}
 /* The carets sit inside 20px rows: a 24px control is a 24px row. Touch gets
    its size back at the bottom of the file, where the pointer is coarse. */
-.project-line--head .btn--icon, .tier-row__inner .btn--icon { width: 20px; height: 20px; }
+.project-line--head .btn--icon, .group-row__inner .btn--icon { width: 20px; height: 20px; }
 .project-line { display: flex; align-items: center; gap: 6px; }
 .project-line--head { flex-wrap: wrap; row-gap: 4px; }
 .project-identity { display: flex; align-items: center; gap: 6px; flex: 1 1 60%; min-width: 0; }
@@ -509,22 +525,22 @@ body.col-resize-active { cursor: col-resize; user-select: none; }
 .project-row__actions:focus-within { opacity: 1; }
 
 /* The drop indicator says where the row will land and stays there for as long
-   as the button is held: a line at the edge it will be inserted on, or — over a
-   tier that is collapsed, and therefore is its whole content — a rectangle
-   drawn around that row, meaning "into this tier, last". */
+   as the button is held: a line at the edge it will be inserted on, or, over a
+   group that is collapsed and therefore is its whole content, a rectangle
+   drawn around that row, meaning "into this group, last". */
 .project-main-row.is-dragging { opacity: .5; }
 .project-main-row.drag-over-top > td { box-shadow: inset 0 3px 0 0 hsl(var(--foreground)); }
-.project-main-row.drag-over-bottom > td, .tier-row.drag-over-bottom > td {
+.project-main-row.drag-over-bottom > td, .group-row.drag-over-bottom > td {
   box-shadow: inset 0 -3px 0 0 hsl(var(--foreground));
 }
-.tier-row.drag-over-into > td {
+.group-row.drag-over-into > td {
   box-shadow: inset 0 3px 0 0 hsl(var(--foreground)), inset 0 -3px 0 0 hsl(var(--foreground));
 }
-.tier-row.drag-over-into > td:first-child {
+.group-row.drag-over-into > td:first-child {
   box-shadow: inset 0 3px 0 0 hsl(var(--foreground)), inset 0 -3px 0 0 hsl(var(--foreground)),
               inset 3px 0 0 0 hsl(var(--foreground));
 }
-.tier-row.drag-over-into > td:last-child {
+.group-row.drag-over-into > td:last-child {
   box-shadow: inset 0 3px 0 0 hsl(var(--foreground)), inset 0 -3px 0 0 hsl(var(--foreground)),
               inset -3px 0 0 0 hsl(var(--foreground));
 }
@@ -535,7 +551,11 @@ body.col-resize-active { cursor: col-resize; user-select: none; }
   font-size: 10px; font-weight: 600; color: hsl(var(--muted-foreground));
   font-variant-numeric: tabular-nums;
 }
-.resource-cell { padding: 2px 8px 2px 26px; border-left: 3px solid var(--tier, transparent); }
+.resource-cell {
+  padding: 2px 8px 2px 26px;
+  border-left: 3px solid var(--rail, transparent);
+  background: color-mix(in srgb, var(--rail) var(--band-tint), hsl(var(--card)));
+}
 .resource-cell--flat { padding-left: 16px; }
 .resource-line { font-size: 10.5px; color: hsl(var(--muted-foreground)); display: flex; align-items: center; gap: 6px; }
 .resource-line[data-action] { cursor: pointer; border-radius: 4px; }
@@ -592,7 +612,7 @@ body.col-resize-active { cursor: col-resize; user-select: none; }
 .row-warning { display: inline-flex; color: hsl(var(--warning)); }
 .row-warning .icon { width: 12px; height: 12px; }
 /* One treatment, vertically centred in whatever height the row ends up with.
-   The tier tint is held back so that a blocked project — the signal — is the
+   The rank tint is held back so that a blocked project, the signal, is the
    louder bar of the two, which is exactly what it was not before. */
 .summary-bar { top: 50%; transform: translateY(-50%); height: 16px; opacity: .55; }
 .summary-bar--blocked { opacity: 1; }
@@ -613,7 +633,7 @@ body.col-resize-active { cursor: col-resize; user-select: none; }
 
 /* ─── Detail panel ─────────────────────────────────────────────────────────
    The panel is part of the project above it, not a card between two projects.
-   Four things say so: it carries the same tier rail as the rows of that block,
+   Four things say so: it carries the same rail as the rows of that block,
    so the vertical line runs unbroken from the project row down past it; it
    hangs from the row with no gap above; it is indented to where the people of
    that project are listed; and the row it belongs to takes a background for as
@@ -628,16 +648,16 @@ body.col-resize-active { cursor: col-resize; user-select: none; }
   padding: 0 10px 12px 0;
   /* Opaque, and that is the whole point: the grid lines and the today band are
      painted down the full height of the scroller, and a panel is not a row of
-     the chart. Solid here is the bottom edge of the chart — the last person's
-     row — instead of a green stripe running under a form. */
+     the chart. Solid here is the bottom edge of the chart, the last person's
+     row, instead of a green stripe running under a form. */
   background: hsl(var(--muted));
   border-bottom: 1px solid hsl(var(--border));
-  border-left: 3px solid var(--tier, transparent);
+  border-left: 3px solid var(--rail, transparent);
   position: relative; z-index: 2;
 }
 .detail-panel-wrapper {
   position: sticky; left: 0; width: 1200px;
-  /* 3px of tier rail, 23px of indent, and 2px of slack for its own border. */
+  /* 3px of rail, 23px of indent, and 2px of slack for its own border. */
   max-width: calc(100cqw - 28px); box-sizing: border-box; z-index: 2;
   margin-left: 23px; padding-top: 10px;
 }
@@ -653,7 +673,7 @@ body.col-resize-active { cursor: col-resize; user-select: none; }
 }
 
 /* A panel opened from the project list is the same node, moved under the card
-   that describes it — not a copy, and not an overlay: `All details` opens one
+   that describes it. It is moved, never copied, and never an overlay: `All details` opens one
    per project, and a screen of stacked overlays is a screen of dismissals.
    Out of the table it lays out as a block, and it takes its width from the
    screen rather than from a timeline it is no longer sitting in. */
@@ -770,7 +790,7 @@ body.col-resize-active { cursor: col-resize; user-select: none; }
 .add-todo-form__textarea, .todo-edit-text, .intro-edit-textarea { min-height: 60px; font-size: 12px; }
 .add-todo-form__row { display: flex; gap: 6px; align-items: center; }
 /* A date field with no value is an empty box on iOS: no format, no hint,
-   nothing. The label beside it is not decoration — it is the only thing that
+   nothing. The label beside it is the only thing that
    says what the box is. */
 .due-field { display: inline-flex; align-items: center; gap: 6px; }
 .due-field .field-label { white-space: nowrap; }
@@ -814,7 +834,7 @@ body.col-resize-active { cursor: col-resize; user-select: none; }
 /* The chart is pinned to the top of the window, so anything below it would be
    unreachable: the footer is pinned to the bottom instead, one line tall, and
    the chart's height subtracts it. Everything in it belongs to this browser
-   rather than to the deployment — how it asks, how it looks, what it shows. */
+   rather than to the deployment: how it asks, how it looks, what it shows. */
 footer {
   position: sticky; bottom: 0; z-index: 3;
   margin-top: 20px; padding: 5px 2px;
@@ -926,12 +946,12 @@ footer {
 
 .tree, .tree ul { list-style: none; }
 .tree ul { margin-left: 14px; padding-left: 10px; border-left: 1px solid hsl(var(--border)); }
-.tree__tier {
+.tree__group {
   font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
   display: block; margin-top: 14px;
 }
-.tree__tier > .tier-row__marker { display: inline-block; margin-right: 6px; }
-.tree__tier:first-child { margin-top: 0; }
+.tree__group > .group-row__marker { display: inline-block; margin-right: 6px; }
+.tree__group:first-child { margin-top: 0; }
 .tree__project {
   font-size: 13px; font-weight: 400; text-transform: none; letter-spacing: 0;
   margin: 6px 0;
@@ -959,22 +979,24 @@ footer {
   font-size: 11.5px; line-height: 1.45;
 }
 
-/* ─── Two things the chart can do without ─────────────────────────────────────
-   Both are preferences, and both are the stylesheet's job: the markup says
-   which tier a row belongs to whatever is on screen, so nothing here changes
-   what is stored or what the page means. */
-:root[data-no-tiers] .tier-row { display: none; }
-/* The id in `#depth-switch .tab` outranks an attribute selector, so the one
-   that hides the button has to name it too. */
-:root[data-no-tiers] #depth-switch [data-depth="groups"] { display: none; }
-
-:root[data-no-rails] .tier-row__cell,
-:root[data-no-rails] .project-cell,
-:root[data-no-rails] .resource-cell,
-:root[data-no-rails] .detail-cell { border-left-color: transparent; }
-:root[data-no-rails] .tier-row__marker,
-:root[data-no-rails] .detail-panel-wrapper::after { display: none; }
-:root[data-no-rails] .spark__bar { background: hsl(var(--muted-foreground)); }
+/* ─── Compact: the whole list at one line each ────────────────────────────────
+   A depth level, and the stylesheet's job alone. The rows keep every attribute
+   they have and nothing about the document changes: what goes is everything a
+   ranked reading does not need: the signals, the row actions, the resource
+   indent. The span bar stays, because a chart with empty lanes is not a chart,
+   and so does the rail, which is the point of the level. */
+:root[data-compact] .project-main-row .project-row__signals,
+:root[data-compact] .project-main-row .project-row__actions,
+:root[data-compact] .project-main-row [data-action="toggle-project"] { display: none; }
+:root[data-compact] .project-cell { padding-top: 1px; padding-bottom: 1px; }
+:root[data-compact] .timeline-row--project { min-height: var(--compact-row-h); }
+/* One line means one line: a title too long for the column is cut, not wrapped,
+   or a single project pushes every other one off the screen. */
+:root[data-compact] .project-identity { min-width: 0; }
+:root[data-compact] .project-title {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+:root[data-compact] .summary-bar { height: 10px; }
 
 /* ─── Settings ────────────────────────────────────────────────────────────────
    One overlay, three subjects. A preference is a sentence and a reason, not a
@@ -990,6 +1012,39 @@ footer {
 .settings-option input { margin-top: 2px; flex: none; }
 .settings-option__text { display: flex; flex-direction: column; gap: 2px; font-size: 12.5px; }
 .settings-option__hint { font-size: 11.5px; color: hsl(var(--muted-foreground)); }
+.settings-group__note {
+  font-size: 11.5px; color: hsl(var(--muted-foreground)); margin: -4px 0 2px; max-width: 46em;
+}
+
+/* The band controls. A preset is the guidance; the sliders are for anyone who
+   wants past it. The swatch shows the colour as it comes out on this theme,
+   which is not the hue that went in. */
+.settings-presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.settings-presets .btn { gap: 6px; }
+.settings-presets .btn::before {
+  content: ""; width: 9px; height: 9px; border-radius: 2px; flex: none;
+  background: var(--swatch, currentColor);
+}
+.settings-range { display: grid; grid-template-columns: 5.5em 1fr 4.5em; gap: 10px; align-items: center; }
+.settings-range__label { font-size: 12.5px; }
+.settings-range__value {
+  font-size: 11.5px; color: hsl(var(--muted-foreground));
+  font-variant-numeric: tabular-nums; text-align: right;
+}
+.settings-range input[type="range"] { width: 100%; min-width: 0; accent-color: hsl(var(--ring)); }
+.hue-track {
+  -webkit-appearance: none; appearance: none; height: 10px; border-radius: 5px;
+  background: linear-gradient(90deg, hsl(0 70% 50%), hsl(60 70% 50%), hsl(120 70% 50%),
+              hsl(180 70% 50%), hsl(240 70% 50%), hsl(300 70% 50%), hsl(360 70% 50%));
+}
+.hue-track::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
+  background: hsl(var(--card)); border: 2px solid hsl(var(--foreground)); cursor: pointer;
+}
+.hue-track::-moz-range-thumb {
+  width: 14px; height: 14px; border-radius: 50%;
+  background: hsl(var(--card)); border: 2px solid hsl(var(--foreground)); cursor: pointer;
+}
 
 /* ─── Dialog: the Advanced Edit overlay ───────────────────────────────────── */
 .advedit-overlay {
@@ -1050,7 +1105,7 @@ input[type="checkbox"] { accent-color: hsl(var(--primary)); }
 .plist, .tabbar { display: none; }
 
 /* ─── Small screens ────────────────────────────────────────────────────────────
-   The page reflows; the chart does not — a timeline is wide by nature, so it
+   The page reflows; the chart does not, because a timeline is wide by nature, so it
    keeps scrolling inside .gantt-scroll while the page itself never does.
 
    The paddings below are not arbitrary: they add up to the 60px that
@@ -1152,7 +1207,7 @@ input[type="checkbox"] { accent-color: hsl(var(--primary)); }
 @media (max-width: 900px) {
   body { padding-bottom: calc(58px + env(safe-area-inset-bottom, 0px)); }
 
-  /* One surface at a time. The root says which — under a different attribute
+  /* One surface at a time. The root says which, under a different attribute
      name than the sections, or `[data-surface] { display: none }` would match
      <html> itself and take the whole page with it. */
   [data-shell="chart"] [data-surface] { display: none; }
@@ -1162,7 +1217,7 @@ input[type="checkbox"] { accent-color: hsl(var(--primary)); }
   :root[data-view="notes"] [data-surface="notes"],
   :root[data-view="more"] [data-surface="more"] { display: block; }
   /* The header nav duplicates the tab bar, and the page title does not earn a
-     line of its own on 390px. On a page with no tab bar — the hierarchy view —
+     line of its own on 390px. On a page with no tab bar, the hierarchy view,
      the header is the only way back, so it stays. */
   [data-shell="chart"] header { display: none; }
 
@@ -1228,7 +1283,7 @@ input[type="checkbox"] { accent-color: hsl(var(--primary)); }
   }
   .spark__bar {
     position: absolute; top: 0; bottom: 0; border-radius: 3px;
-    background: var(--tier, hsl(var(--muted-foreground)));
+    background: var(--rail, hsl(var(--muted-foreground)));
   }
   .spark__mark {
     position: absolute; top: -2px; width: 5px; height: 5px; margin-left: -2px;
@@ -1237,7 +1292,7 @@ input[type="checkbox"] { accent-color: hsl(var(--primary)); }
   .spark__today { position: absolute; top: -2px; bottom: -2px; width: 2px; background: hsl(var(--today)); }
 
   /* The notes tab is the aggregated panel and nothing else, so it is never
-     collapsed there — and a control that cannot do anything has no business
+     collapsed there, and a control that cannot do anything has no business
      being on screen: the caret goes with the collapsing, and the header stops
      pretending to be a button. */
   :root[data-view="notes"] #global-todos-content { display: block !important; }
@@ -1271,7 +1326,7 @@ input[type="checkbox"] { accent-color: hsl(var(--primary)); }
   /* ── The chart tab ──
      Occasional by design: you open it to look at a bar, or to show one to
      somebody. The label column keeps the name and the caret and gives
-     everything else back to the timeline — the status, the deadline and the
+     everything else back to the timeline: the status, the deadline and the
      actions are on the card you came from and in the sheet behind it. */
   /* The caret takes the height of the row rather than a line of its own, and
      the title wraps beside it: a project row was 87px for two lines of text. */
@@ -1295,29 +1350,29 @@ input[type="checkbox"] { accent-color: hsl(var(--primary)); }
   :root[data-view="chart"] .resource-line[data-action] { min-height: 32px; }
   /* The panel is bounded by the window, not by the table it sits in: the table
      is as wide as the timeline, and a sticky cell that wide lets the controls
-     on its right — Close, Add, the ✕ of an attachment — run off the screen
+     on its right (Close, Add, the ✕ of an attachment) run off the screen
      with no way back. The gutter is everything standing to the left of the
-     panel (10 body + 8 chart box + 3 tier rail + 12 indent) plus the 10 of
+     panel (10 body + 8 chart box + 3 rail + 12 indent) plus the 10 of
      body padding on the right, and 9 of slack for its own border. */
   :root[data-view="chart"] .detail-panel-wrapper {
     /* 3px of rail, 12px of indent, 12px of air on the right. */
     max-width: calc(100cqw - 27px); margin-left: 12px;
-    /* It still has to stick — the cell under it is as wide as the timeline,
+    /* It still has to stick, because the cell under it is as wide as the timeline,
        so a static panel would scroll away with the bars. But it sticks where
-       it already stands, 12px of indent past the 3px tier rail, instead of at
+       it already stands, 12px of indent past the 3px rail, instead of at
        the scrollport's edge: a threshold further left than the element is a
        threshold it slides to before it holds. The panel belongs to the
        project, not to the axis, so it does not move at all. */
     left: 15px;
   }
   /* The rail belongs to the project, and the project's rows keep theirs in
-     view by being sticky. The cell is not sticky — it is as wide as the
-     timeline — so the rail moves onto the panel, which is, and lands on the
+     view by being sticky. The cell is not sticky, since it is as wide as the
+     timeline, so the rail moves onto the panel, which is, and lands on the
      same pixel as the rails above it at any scroll offset. */
   :root[data-view="chart"] .detail-cell { padding: 0 0 10px; border-left-color: transparent; }
   :root[data-view="chart"] .detail-panel-wrapper::after {
     content: ''; position: absolute; left: -15px; top: 0; bottom: -10px;
-    width: 3px; background: var(--tier, transparent);
+    width: 3px; background: var(--rail, transparent);
   }
   :root[data-view="chart"] .gantt-toolbar__actions { justify-content: space-between; }
 
@@ -1328,7 +1383,7 @@ input[type="checkbox"] { accent-color: hsl(var(--primary)); }
 }
 
 /* ─── Touch ────────────────────────────────────────────────────────────────────
-   Anything a finger operates is at least 44pt in both directions — the iOS
+   Anything a finger operates is at least 44pt in both directions, the iOS
    guideline, and the reason half of these rules exist. Everything a finger
    does *not* operate gives its space back instead: the two go together, or the
    screen fills with padding around controls nobody can hit. */
@@ -1342,7 +1397,7 @@ input[type="checkbox"] { accent-color: hsl(var(--primary)); }
   .btn { height: 44px; padding: 0 14px; }
   .btn--sm { height: 44px; padding: 0 12px; }
   .btn--icon, .btn--sm.btn--icon { width: 44px; }
-  .project-line--head .btn--icon, .tier-row__inner .btn--icon { width: 44px; height: 44px; }
+  .project-line--head .btn--icon, .group-row__inner .btn--icon { width: 44px; height: 44px; }
   .tab { min-height: 40px; }
   .tag-opt-btn { min-height: 44px; padding: 0 14px; }
   .todo-check { min-width: 44px; min-height: 44px; margin: -6px 0 -6px -6px; }

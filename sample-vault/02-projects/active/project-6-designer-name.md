@@ -1,7 +1,6 @@
 # Designer's name & brand page "phase 2"
 - id: project-6-designer-name
 - type: project
-- tier: tier-2
 - priority: 6
 - status: active
 - intro: Extend the designer name to every product, including outlet & marketplace items.

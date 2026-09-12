@@ -1,7 +1,6 @@
 # Carrier tracking URL
 - id: project-5-carrier-tracking
 - type: project
-- tier: tier-2
 - priority: 5
 - status: active
 - intro: Show the carrier tracking URL instead of the raw tracking number in the order detail.

@@ -1,10 +1,10 @@
 /* ============================================================================
-   Delivery ASAP hub — the public page.
+   Delivery ASAP hub: the public page.
 
    The same vocabulary as the application: the shadcn tokens it was ported onto,
    the same diamond, light and dark by the system preference. A landing page
    that looks like the thing it is selling is the cheapest honest signal there
-   is — and the only one this page makes.
+   is, and the only one this page makes.
    ========================================================================== */
 
 :root {
@@ -18,9 +18,12 @@
   --primary-foreground: 210 40% 98%;
   --accent: 210 40% 94%;
   --today: 142 69% 27%;
-  --tier-1: 0 65% 51%;
-  --tier-2: 28 100% 40%;
-  --tier-3: 122 39% 41%;
+  /* The priority ramp: one hue, fading down the list. The application solves
+     these against whichever theme is on; the page only has to show the idea. */
+  --band-1: 223 53% 45%;
+  --band-2: 223 40% 57%;
+  --band-3: 223 26% 68%;
+  --band-4: 223 12% 79%;
   --radius: 10px;
   --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;

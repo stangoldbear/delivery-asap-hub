@@ -1,8 +1,8 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Delivery ASAP hub — deployment settings
+# Delivery ASAP hub: deployment settings
 #
 # Everything an organisation needs to change lives here: no Python edit needed
-# to add a tier, a role, a team member or a project code.
+# to add a role, a team member or a project code.
 # A settings.local.toml next to this file (git-ignored) is layered on top of it:
 # it only needs the handful of keys that differ. Tables merge, lists replace.
 # `--settings PATH` bypasses both and reads that file alone.
@@ -46,27 +46,10 @@ month_abbr = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
 weekday_initials = ["M", "T", "W", "T", "F", "S", "S"]
 
 [defaults]
-tier = "tier-3"                  # used when a card declares an unknown tier
 # Platforms offered as toggles in the detail panel.
 platforms = ["iOS", "Android", "Backend (dev)", "Backend (config)", "Content", "QA"]
 # Colour for timeline rows whose `who` matches no one in the roster below.
 fallback_role  = { label = "Member", color = "#78909c" }
-
-# ─── Tiers: rendering order = declaration order ──────────────────────────────
-[[tiers]]
-key   = "tier-1"
-title = "TIER 1 — CORE & COMPLIANCE (HIGH PRIORITY)"
-rgb   = [211, 47, 47]
-
-[[tiers]]
-key   = "tier-2"
-title = "TIER 2 — IMPORTANT & STRATEGIC"
-rgb   = [245, 124, 0]
-
-[[tiers]]
-key   = "tier-3"
-title = "TIER 3 — SUPPORT & MINOR"
-rgb   = [67, 160, 71]
 
 # ─── Roles ───────────────────────────────────────────────────────────────────
 # `squads` below assigns a role explicitly per member; `roles` is only the

@@ -3,7 +3,7 @@ The project card schema, declared once.
 
 `api` validates and applies updates from it, and the browser renders the
 Advanced Edit form from the same declaration served as JSON. Adding a field
-is a one-line change here — not three edits kept in sync by hand.
+is a one-line change here, instead of three edits kept in sync by hand.
 """
 
 from . import settings as settings_module
@@ -68,8 +68,6 @@ def sections(settings=None):
     return [
         {'key': 'general', 'legend': 'General', 'fields': [
             field('name', 'Project name'),
-            field('tier', 'Tier', readonly=True, choices=list(config.tiers),
-                  help='Set by drag & drop in the chart'),
             field('priority', 'Priority', readonly=True,
                   help='Set by drag & drop in the chart'),
             field('status', 'Status', choices=settings_module.STATUS_OPTIONS),

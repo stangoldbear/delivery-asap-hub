@@ -1,7 +1,6 @@
 # Top categories endpoint
 - id: project-7-menu-endpoint
 - type: project
-- tier: tier-2
 - priority: 7
 - status: active
 - intro: New endpoint for the top categories carousel. No timeline task yet: the expand caret must render disabled.

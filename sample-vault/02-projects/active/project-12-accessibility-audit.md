@@ -1,7 +1,6 @@
 # Accessibility audit & remediation
 - id: project-12-accessibility-audit
 - type: project
-- tier: tier-3
 - priority: 12
 - status: dropped
 - intro:

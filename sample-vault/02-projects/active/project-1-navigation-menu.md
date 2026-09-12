@@ -1,7 +1,6 @@
 # Navigation menu — second level
 - id: project-1-navigation-menu
 - type: project
-- tier: tier-1
 - priority: 1
 - status: active
 - blocked_reason:
@@ -58,7 +57,6 @@
   - milestone-project-1-navigation-menu-2-1788200001
     - date: 2026-11-14
     - text: Store submission
-
 - dates
   - soft_deadline: 2026-11-06
   - mandatory_deadline: 2026-11-20

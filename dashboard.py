@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Delivery ASAP hub — entry point and composition root.
+Delivery ASAP hub: entry point and composition root.
 
     ./dashboard.py                      default settings.toml
     ./dashboard.py --port 8090
     ./dashboard.py --vault sample-vault --port 8090
     ./dashboard.py --migrate-vault              convert a pre-0.1.0 YAML vault
     ./dashboard.py --import-plan                move a delivery plan into the cards
+    ./dashboard.py --drop-tiers                 bring a pre-1.2 vault forward
 """
 
 import argparse
@@ -16,7 +17,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dahub import settings as settings_module
-from dahub.migrate import DEFAULT_PLAN, import_plan, migrate_vault, read_project_codes
+from dahub.migrate import (DEFAULT_PLAN, drop_tiers, import_plan, migrate_vault,
+                           read_project_codes)
 from dahub.repository import ProjectRepository
 from dahub.server import run
 
@@ -36,6 +38,12 @@ def parse_args(argv):
     parser.add_argument('--import-plan', nargs='?', const=True, metavar='PATH',
                         help='move the rows of a mermaid delivery plan into the cards '
                              'that own them; the plan file is left untouched')
+    parser.add_argument('--drop-tiers', nargs='?', const=True, metavar='PATH',
+                        help='bring a pre-1.2 vault forward: remove `tier` from every '
+                             'card and renumber `priority` over the whole list; prints '
+                             'what it would do unless --apply is given too')
+    parser.add_argument('--apply', action='store_true',
+                        help='let --drop-tiers write the cards instead of only listing them')
     return parser.parse_args(argv[1:])
 
 
@@ -59,6 +67,10 @@ def main(argv):
         directory = (config.projects_dir if args.migrate_vault is True
                      else args.migrate_vault)
         return migrate(directory)
+
+    if args.drop_tiers:
+        directory = (config.projects_dir if args.drop_tiers is True else args.drop_tiers)
+        return drop_the_tiers(directory, args.settings or 'settings.toml', args.apply)
 
     run(config)
     return 0
@@ -89,6 +101,30 @@ def import_the_plan(config, plan_path, settings_path):
     return 0
 
 
+def drop_the_tiers(directory, settings_path, apply):
+    """Renumber a pre-1.2 vault, listing every card it touches before it does."""
+    if not os.path.isdir(directory):
+        print(f'Not a directory: {directory}', file=sys.stderr)
+        return 2
+
+    summary = drop_tiers(directory, settings_path, apply=apply)
+    for entry in summary['changed']:
+        tier = entry['tier'] or '—'
+        print(f"{entry['file']:<44}  {tier:<8}  priority {entry['from'] or '—':>3} → {entry['to']}")
+
+    if not summary['changed']:
+        print(f"{summary['total']} cards, nothing to change: no tier is left and the "
+              f"priorities are already a sequence.")
+        return 0
+
+    print(f"\n{len(summary['changed'])} of {summary['total']} cards", end=' ')
+    if apply:
+        print('rewritten. There is no backup: check `git diff`, or your own copy.')
+    else:
+        print('would change. Nothing was written; add --apply to do it.')
+    return 0
+
+
 def migrate(directory):
     """Convert a vault of YAML cards and report what happened to each file."""
     if not os.path.isdir(directory):
@@ -104,7 +140,7 @@ def migrate(directory):
         print(f'FAILED     {name}  {reason}', file=sys.stderr)
 
     print(f"\n{len(summary['converted'])} converted, {len(summary['skipped'])} skipped, "
-          f"{len(summary['failed'])} failed — in {directory}")
+          f"{len(summary['failed'])} failed, in {directory}")
     return 1 if summary['failed'] else 0
 
 

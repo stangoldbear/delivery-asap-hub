@@ -1,7 +1,6 @@
 # Analytics SDK migration
 - id: project-4-analytics-migration
 - type: project
-- tier: tier-2
 - priority: 4
 - status: inactive
 - timeline

@@ -1,7 +1,6 @@
 # Eco labels & durability sheet
 - id: project-2-eco-labels
 - type: project
-- tier: tier-1
 - priority: 2
 - status: blocked
 - blocked_reason: Waiting for the legal text approved by compliance

@@ -7,7 +7,6 @@ A card is a markdown document a person can read, grep and multi-edit:
 
     # Navigation menu — second level
     - id: project-1-navigation-menu
-    - tier: tier-1
     - intro:
       ```md
       Two lines of free text,
@@ -105,7 +104,7 @@ def _read_group(lines, index, indent, root=False):
     Read the items sitting at `indent`, from `index` on.
 
     Returns (value, next_index) where value is a dict, a list of strings or a
-    list of objects — whichever the children describe.
+    list of objects, whichever the children describe.
     """
     items = []                       # (kind, key_or_value, value)
     cursor = index
@@ -116,7 +115,7 @@ def _read_group(lines, index, indent, root=False):
             cursor += 1
             continue
 
-        # The entries end at the first line that is not one of them — a
+        # The entries end at the first line that is not one of them: a
         # heading, free text, anything. Whatever follows is the body and is
         # kept verbatim: a card is hand-edited, and text that was typed into
         # it must never be dropped just because it is in the wrong shape.
@@ -128,7 +127,7 @@ def _read_group(lines, index, indent, root=False):
 
         key, rest = _split_key(content)
         if key is not None and rest == '':
-            # `- key:` — a fenced block under it, or the empty string.
+            # `- key:` followed by a fenced block, or the empty string.
             value, cursor = _read_fence(lines, cursor, indent + INDENT)
             items.append(('entry', key, value))
             continue

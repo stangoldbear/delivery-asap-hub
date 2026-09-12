@@ -1,7 +1,7 @@
 """
 HTTP layer: routing, static assets, JSON serialisation.
 
-No domain logic and no markup here — it only wires repository, domain and
+No domain logic and no markup here: it only wires repository, domain and
 view together.
 """
 
@@ -47,7 +47,7 @@ _TOKEN_PAGE = """<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <h3 class="dialog__title">Access token required</h3>
 <p class="dialog__body">This hub is reachable from the network, so every request
 carries a shared secret. Open the link it was started with, or paste the token
-here — it is stored as a cookie for a week.</p>
+here. It is stored as a cookie for a week.</p>
 <form class="dialog__fields" method="get" action="/">
   <label class="dialog__field"><span class="field-label">Token</span>
   <input class="form-input" type="password" name="k" autocomplete="current-password"
@@ -76,8 +76,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             # secret stops travelling in links, titles and the address bar.
             rest = {k: v for k, v in query.items() if k != _TOKEN_PARAM}
             target = path + ('?' + urlencode(rest) if rest else '')
-            # Lax, not Strict: the link is opened from somewhere else — a chat,
-            # a mail, a note — and Strict withholds the cookie on a navigation
+            # Lax, not Strict: the link is opened from somewhere else, a chat,
+            # a mail or a note, and Strict withholds the cookie on a navigation
             # that started off-site, which is the only way this link is ever
             # used. Lax still refuses to travel with a cross-site POST/PUT/
             # DELETE, and every mutation here is one of those.
@@ -339,7 +339,7 @@ def _report_empty_vault(config):
         return
 
     demo = os.path.join(settings_module.BASE_DIR, 'sample-vault')
-    print(f'\nNo project cards in {config.projects_dir} — the dashboard will be empty.')
+    print(f'\nNo project cards in {config.projects_dir}: the dashboard will be empty.')
     print('  Point it at your own vault:   dashboard.py --vault PATH')
     if os.path.isdir(demo):
         print('  Or take the demo for a spin:  dashboard.py --vault sample-vault')

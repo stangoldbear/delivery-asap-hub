@@ -80,7 +80,7 @@ class ProjectRepository:
             return handle.read()
 
     def list_all(self):
-        """Every card, ordered by tier declaration order then priority."""
+        """Every card, ranked: the live list first, then DONE and DROPPED."""
         if not os.path.isdir(self.directory):
             return []
 
@@ -103,7 +103,8 @@ class ProjectRepository:
             projects.append(data)
 
         # Group first, `priority` second: a number edited by hand into a card
-        # can only misplace it inside its own group, never move it out.
+        # can only misplace it inside the live list, never pull a finished
+        # project back up among the live ones.
         projects.sort(key=lambda project: (
             group_rank(display_group(project, self.settings), self.settings),
             project.get('_prio_num', 99),
@@ -164,7 +165,7 @@ class ProjectRepository:
         """
         Write the card text as typed, after validating it.
 
-        It must parse back as a card — a `# title` and at least one entry —
+        It must parse back as a card, with a `# title` and at least one entry,
         so a broken outline in the markdown editor never reaches the file.
         """
         data, _ = parse_card(text)
@@ -177,7 +178,7 @@ class ProjectRepository:
     # Every card, in the order the chart draws them. It is the monthly snapshot
     # and the multi-card editor: one text to read, grep, diff and archive.
     def vault_markdown(self):
-        """Every card concatenated, in tier and priority order."""
+        """Every card concatenated, in the order the chart draws them."""
         blocks = []
         for project in self.list_all():
             text = self.read_raw(project['id'])

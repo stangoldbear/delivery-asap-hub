@@ -1,7 +1,8 @@
 """
-Domain logic: dates, tiers, roles, the timeline a card declares, calendar.
+Domain logic: dates, the priority ramp, roles, the timeline a card declares,
+calendar.
 
-Pure and testable: no I/O, no HTML, and no hidden clock — "today" is passed
+Pure and testable: no I/O, no HTML, and no hidden clock; "today" is passed
 in so every rendering decision can be reproduced in a test.
 """
 
@@ -58,7 +59,7 @@ def format_relative(value, today=None, settings=None):
     How far away a date is, in words: `in 9 weeks`, `tomorrow`, `2 days ago`.
 
     A deadline is read as time remaining, not as a date to subtract from today
-    in your head — and a date that is not a date ("mid October") has no distance
+    in your head, and a date that is not a date ("mid October") has no distance
     to report, so it reports none.
     """
     today = today or date.today()
@@ -87,47 +88,37 @@ def format_relative(value, today=None, settings=None):
     return f'in {amount}' if ahead else f'{amount} ago'
 
 
-# ─── Tiers ───────────────────────────────────────────────────────────────────
-def tier_key(project, settings=None):
-    config = _settings(settings)
-    key = str(project.get('tier', config.default_tier)).lower()
-    return key if key in config.tiers else config.default_tier
+# ─── The priority ramp ───────────────────────────────────────────────────────
+# A project's rank is its whole visual identity now that tiers are gone: the
+# band down its left edge travels from the accent colour at the top of the list
+# to a near-grey at the bottom. The two ends are theme tokens the browser
+# resolves, so all that has to be worked out here is how far along a project
+# sits, which is arithmetic and belongs where it can be tested.
+def band_position(index, total):
+    """
+    How far down the ramp the project at `index` of `total` sits, in percent.
 
-
-def tier_rgb(key, settings=None):
-    config = _settings(settings)
-    return config.tiers.get(key, config.tiers[config.default_tier])['rgb']
-
-
-def tier_color(key, settings=None):
-    return settings_module.hex_color(tier_rgb(key, settings))
-
-
-def tier_title(key, settings=None):
-    config = _settings(settings)
-    return config.tiers.get(key, config.tiers[config.default_tier])['title']
-
-
-def summary_bar_color(key, status, settings=None):
-    if status == 'blocked':
-        return settings_module.BLOCKED_COLOR
-    return tier_color(key, settings)
+    A list of one is the top of the ramp rather than the bottom: the only
+    project there is is the most important one.
+    """
+    if total <= 1 or index <= 0:
+        return 0.0
+    return min(index, total - 1) / (total - 1) * 100
 
 
 # ─── Display groups ─────────────────────────────────────────────────────────
-# The chart draws every tier in declaration order and then two further groups,
-# DONE and DROPPED, at the very bottom. A project lands in one of them because
-# of its status, whatever tier it carries — and the tier is left untouched, so
-# it survives the round trip and comes back when the project does.
+# Every live project is drawn in one flat list, ranked; DONE and DROPPED follow
+# at the very bottom, under a heading each. They are the only two groups left,
+# and a project lands in one because of its status alone.
 def display_group(project, settings=None):
     status = str(project.get('status', '') or '').lower()
     if status in settings_module.DISPLAY_GROUPS:
         return status
-    return tier_key(project, settings)
+    return settings_module.LIVE_GROUP
 
 
 def group_order(settings=None):
-    return list(_settings(settings).tiers) + list(settings_module.DISPLAY_GROUPS)
+    return [settings_module.LIVE_GROUP] + list(settings_module.DISPLAY_GROUPS)
 
 
 def is_display_group(key):
@@ -136,12 +127,12 @@ def is_display_group(key):
 
 def group_title(key, settings=None):
     group = settings_module.DISPLAY_GROUPS.get(key)
-    return group['title'] if group else tier_title(key, settings)
+    return group['title'] if group else settings_module.LIVE_GROUP_TITLE
 
 
 def group_color(key, settings=None):
     group = settings_module.DISPLAY_GROUPS.get(key)
-    return settings_module.hex_color(group['rgb']) if group else tier_color(key, settings)
+    return settings_module.hex_color(group['rgb']) if group else ''
 
 
 def group_by_display(projects, settings=None):
@@ -262,7 +253,7 @@ def project_tasks(project, settings=None):
     The rows a card declares, as the chart consumes them.
 
     A task carries who it belongs to, its span, its flags and whether it falls
-    outside the span its own project declares — which is a warning, never a
+    outside the span its own project declares, which is a warning, never a
     reason to drop the row.
     """
     timeline = project.get('timeline') or {}

@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 
 from .cardmd import build_card, parse_card
 from .domain import add_working_days
+from .repository import write_atomic
 
 _MERMAID_RE = re.compile(r'```mermaid\n(.*?)\n```', re.DOTALL)
 _GANTT_KEYWORDS = ('gantt', 'title', 'dateFormat', 'axisFormat', 'tickInterval', 'excludes')
@@ -34,7 +35,7 @@ def strip_comment(raw):
     Drop a trailing `# comment` from a scalar, YAML-style.
 
     A `#` only starts a comment at the start of the value or after a space,
-    and never inside a quoted string — so `"a # b"` and `http://x/#frag`
+    and never inside a quoted string, so `"a # b"` and `http://x/#frag`
     keep their hash.
     """
     value = raw.strip()
@@ -132,7 +133,7 @@ def parse_yaml_text(text):
                 continue
             item = stripped[2:].strip()
             # A quoted scalar or a URL is never an inline map, even though it
-            # contains `:` — only an unquoted `key: value` is.
+            # contains `:`; only an unquoted `key: value` is.
             is_inline_map = (
                 ':' in item
                 and not item.startswith(('{', '[', '"', "'"))
@@ -183,7 +184,7 @@ def convert(text):
 
     Two renames the format brings with it: the completed notes live under
     `done` rather than `todos_history`, and the per-item `done: true` flag is
-    dropped — the category is the state, and the two could contradict.
+    dropped: the category is the state, and the two could contradict.
     """
     data, body = parse_frontmatter(text)
     if not data:
@@ -241,6 +242,87 @@ def migrate_vault(directory):
         converted.append(name)
 
     return {'converted': converted, 'skipped': skipped, 'failed': failed}
+
+
+# ─── Tiers, read one last time ───────────────────────────────────────────────
+# Up to 1.1 a card belonged to a tier and `priority` ranked it inside that
+# tier, so three cards could all be "1". 1.2 drops the tier and makes
+# `priority` the position in one flat list, which means the numbers have to be
+# rewritten while the tiers are still there to say what the order was.
+_CLOSING_STATUSES = ('done', 'dropped')
+
+
+def read_tier_order(settings_path):
+    """
+    The retired `[[tiers]]` table, in declaration order, straight from the file.
+
+    A vault being upgraded may sit beside a settings file that still declares
+    them, or beside a 1.2 one that no longer does. Both are expected: the
+    caller falls back to the order the cards themselves imply.
+    """
+    try:
+        with open(settings_path, 'rb') as handle:
+            entries = tomllib.load(handle).get('tiers') or []
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    return [str(entry['key']) for entry in entries
+            if isinstance(entry, dict) and entry.get('key')]
+
+
+def _old_position(data, tier_order):
+    """Where a card sat in 1.1: closing statuses last, then tier, then priority."""
+    status = str(data.get('status', '') or '').lower()
+    tier = str(data.get('tier', '') or '').lower()
+    try:
+        priority = int(str(data.get('priority', '')).strip())
+    except (TypeError, ValueError):
+        priority = 99
+    return (
+        _CLOSING_STATUSES.index(status) + 1 if status in _CLOSING_STATUSES else 0,
+        tier_order.index(tier) if tier in tier_order else len(tier_order),
+        priority,
+        str(data.get('id', '')),
+    )
+
+
+def drop_tiers(directory, settings_path, apply=False):
+    """
+    Remove `tier` from every card and renumber `priority` 1..N, in place.
+
+    Read-only unless `apply` is true, so the change can be inspected first.
+    A vault with no `tier` left and priorities already in sequence reports no
+    change at all, which is what makes running it twice harmless.
+    """
+    cards = []
+    for path in sorted(glob.glob(os.path.join(directory, '*.md'))):
+        with open(path, 'r', encoding='utf-8') as handle:
+            text = handle.read()
+        data, body = parse_card(text)
+        if data:
+            cards.append((path, data, body))
+
+    tier_order = read_tier_order(settings_path)
+    if not tier_order:
+        # No table to read: the tiers the cards name, in their own order.
+        tier_order = sorted({str(data.get('tier', '') or '').lower()
+                             for _, data, _ in cards if data.get('tier')})
+
+    cards.sort(key=lambda card: _old_position(card[1], tier_order))
+
+    changed = []
+    for rank, (path, data, body) in enumerate(cards, start=1):
+        was_tier, was_priority = data.get('tier'), str(data.get('priority', ''))
+        if was_tier is None and was_priority == str(rank):
+            continue
+
+        data.pop('tier', None)
+        data['priority'] = str(rank)
+        if apply:
+            write_atomic(path, build_card(data, body))
+        changed.append({'file': os.path.basename(path), 'id': data.get('id', ''),
+                        'tier': was_tier, 'from': was_priority, 'to': str(rank)})
+
+    return {'total': len(cards), 'changed': changed, 'applied': bool(apply)}
 
 
 # ─── The delivery plan, read one last time ───────────────────────────────────
@@ -325,7 +407,7 @@ def read_project_codes(settings_path):
     """
     The retired `[project_codes]` table, read straight from the settings file.
 
-    The application no longer knows about short codes — a card owns its rows —
+    The application no longer knows about short codes, because a card owns its rows,
     but the plan being imported is still written in them.
     """
     try:
@@ -339,7 +421,7 @@ def import_plan(repository, plan_path, codes):
     """
     Move every plan row carrying a project code into that project's card.
 
-    The file itself is left untouched — it is read once and then has no reader
+    The file itself is left untouched: it is read once and then has no reader
     left. Rows with no code, or with a code for a card that is gone, are
     reported rather than dropped silently.
     """

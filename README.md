@@ -7,7 +7,7 @@ project notes, actions, links, attachments and an editable card schema.
 Nothing leaves your machine, nothing is installed: it is Python 3.11+ standard
 library and two static assets.
 
-![tiers → projects → people](docs/hierarchy.svg)
+![projects → people](docs/hierarchy.svg)
 
 ## Quick start
 
@@ -33,7 +33,7 @@ python3 dashboard.py
 | `--token` | shared secret demanded off loopback (generated when omitted) |
 
 The server binds to loopback by default. Bind it anywhere else and it demands
-an access token on every request — one is generated at startup and printed
+an access token on every request. One is generated at startup and printed
 inside the URL to open:
 
 ```
@@ -43,34 +43,29 @@ Reachable from other machines: that link carries the access token.
 
 Opening that link sets an HttpOnly cookie and redirects to the clean URL. Set
 your own with `--token` or `[server] token` in `settings.toml`. It is a shared
-secret over plain HTTP, so it keeps strangers on the same Wi-Fi out — it is not
-a substitute for TLS on a hostile network.
+secret over plain HTTP, so it keeps strangers on the same Wi-Fi out. On a
+hostile network it is no substitute for TLS.
 
-## On a phone
+## The chart
 
-The layout reflows below 900px: the detail panel becomes a single column and
-the page never scrolls sideways. The chart still does — a timeline is wide by
-nature — inside its own container. Two controls are hidden on touch because
-they need a pointing device: resizing the label column, and dragging rows to
-reorder them.
-
-The toolbar carries four things: a search, how deep the chart is unfolded —
-**Groups**, **Projects**, **Stakeholders**, **All details**, absolute levels
-rather than toggles, so they do the same thing whatever is folded right now —
-the zoom (**Day**, **Week**, **Month**: a column is always a working day, the
-zoom decides how wide it is drawn), and the window it is drawn through: from today, the last 30 days, this year, all dates,
-or from a date you pick. The choice travels in the URL (`?from=…`) and is
+The toolbar carries a search, a depth, a zoom and a window. The depth levels
+are **Groups**, **Projects**, **Stakeholders** and **All details**: absolute
+levels rather than toggles, so each one does the same thing whatever is folded
+right now. The zoom is **Day**, **Week** or **Month**; a column is always a
+working day, and the zoom decides how wide it is drawn. The window is what the
+chart is drawn through: from today, the last 30 days, this year, all dates, or
+from a date you pick. The choice travels in the URL (`?from=…`) and is
 remembered per browser, and so is everything you collapsed, opened and scrolled
 to: a save reloads the page and puts you back where you were, including the
 chart's own horizontal position.
 
-The footer sets the theme — System, Light, Dark, or one of thirteen palettes
-borrowed from well-known editors behind **More…** — and whether saving and
+The footer sets the theme (System, Light, Dark, or one of thirteen palettes
+borrowed from well-known editors behind **More…**) and whether saving and
 discarding ask first.
 
 Bars are dragged and resized in the chart: grab one in the middle to move it,
 or either edge to change where it starts or ends. Whole working days, applied
-to the dates the card holds — so a bar whose start is hidden by "show from
+to the dates the card holds, so a bar whose start is hidden by "show from
 today" still moves by exactly what you dragged.
 
 A **milestone** is a dated mark on the project's own lane, drawn as the
@@ -81,46 +76,54 @@ what happens on it.
 
 A project is finished by dragging it into **DONE** at the bottom of the chart,
 abandoned by dragging it into **DROPPED**, and brought back by dragging it into
-a tier — which is also what the status select in its panel does. The tier it
-carries is never touched, so it returns where it belongs, and neither group
-appears in the aggregated action list: finished work should stop asking for
-attention. `priority` is the project's position over the whole chart, so the
-number in the card is the number on the screen.
+the list above them, which is also what the status select in its panel does.
+Neither group appears in the aggregated action list, so finished work stops
+asking for attention. `priority` is the project's position in that one list, so
+the number in the card is the number on the screen.
+
+Every project carries a coloured band down its left edge, and the colour is its
+rank: full accent at the top of the list, fading to a near-grey at the bottom.
+With a dozen projects two neighbours barely differ, because the band is meant
+to be read as a ramp down the list rather than as a project's identity, and the
+number beside it is what names a position. The two ends are worked out against
+whichever theme is on, so the band holds the same contrast on all of them. Hue,
+intensity, fade and tint are in **Settings**, with four presets.
 
 ## On a phone
 
 Below 900px the chart stops being the interface. A bar at the bottom carries
-four surfaces over the same cards — **Projects**, **Chart**, **Notes**,
-**More** — and the default is a list of project cards: the number and the name,
+four surfaces over the same cards, **Projects**, **Chart**, **Notes** and
+**More**, and the default is a list of project cards: the number and the name,
 the status, the deadline as time remaining, a sparkline of the span with today
 and the milestones on it, the people as initials, and how many notes are
 waiting. Tapping one opens the project full screen with its notes first;
 tapping any value opens its editor. Projects move with **Move up / Move down /
 Move to**, because HTML5 drag and drop does not exist on iOS.
 
-The app installs to the home screen — manifest, icons and a service worker that
-caches the shell and never the data. Worth doing behind a stable hostname: a
-PWA is installed per origin, and a tunnel that mints a new one every night
-leaves the icon pointing at nothing.
+The detail panel becomes a single column and the page never scrolls sideways.
+The chart still does, because a timeline is wide by nature, inside its own
+container. Two controls are hidden on touch because they need a pointing
+device: resizing the label column, and dragging rows to reorder them.
 
 ## Two views over the vault
 
 The chart is one reading of the cards; **Hierarchy** is the other, and the
-header switches between them. *Structure* lists tier → project and then every value the
-card holds, under the names the card uses — the keys this codebase knows
-nothing about included, and the `## Notes` body — with each project foldable on
+header switches between them. *Structure* lists every project and then every value the
+card holds, under the names the card uses (the keys this codebase knows
+nothing about included, and the `## Notes` body) with each project foldable on
 its own. *Markdown* is
 every card concatenated in the same order, editable in one go: a block whose
 `- id:` is unknown creates a card, and a card whose block is not in the text is
-left alone — nothing is ever deleted from that screen. The same document
+left alone. Nothing is ever deleted from that screen. The same document
 downloads as `vault-YYYY-MM.md`, which is the monthly snapshot.
 
 ## Configuration
 
 Everything an organisation changes lives in [`settings.toml`](settings.toml):
-tiers and their colours, squads and the people in them, roles,
-Jira/Confluence/Figma base URLs, wording, vault paths. Adding a tier, a team
-member or a project never requires touching Python.
+squads and the people in them, roles, Jira/Confluence/Figma base URLs,
+wording, vault paths. Adding a team member or a project never requires touching
+Python. The priority band is not there: it is a per-browser preference, set in
+**Settings** beside the theme.
 
 Put the keys that differ in a `settings.local.toml` next to it (git-ignored):
 it is layered over `settings.toml`, so it only carries what you change, and
@@ -142,7 +145,7 @@ root = "/path/to/your/vault"
 └── 02-projects/active/attachments/<project-id>/    its files, any type
 ```
 
-A card is a markdown outline — the title is the project name, every field is
+A card is a markdown outline: the title is the project name, every field is
 a `- key: value` item, and free text lives under `## Notes`. Everything in
 [`dahub/schema.py`](dahub/schema.py) is editable from the UI; unknown keys are
 preserved untouched, so you can keep your own fields in a card.
@@ -150,9 +153,8 @@ preserved untouched, so you can keep your own fields in a card.
 ````markdown
 # Navigation menu — second level
 - id: project-1-navigation-menu
-- tier: tier-1
 - status: active                     (done and dropped give it its own group)
-- priority: 1
+- priority: 1                        (position in the list, set by drag & drop)
 - intro:
   ```md
   Multi-line values are fenced, so nothing has to be escaped.
@@ -175,8 +177,8 @@ A vault written before 0.1.0 is converted once with
 rewrites and refuses to convert the same card twice.
 
 A project owns its bars. `timeline.start` plus either `timeline.end` or
-`timeline.days` (working days) draws the project bar — it exists even with no
-tasks — and each row under `timeline.tasks` draws one person's bar:
+`timeline.days` (working days) draws the project bar, which exists even with no
+tasks, and each row under `timeline.tasks` draws one person's bar:
 
 ````markdown
 - timeline
@@ -199,6 +201,22 @@ block, as earlier versions used, is moved into the cards once with
 `./dashboard.py --import-plan`, which reports every row it could not place and
 leaves the file untouched.
 
+## What a card becomes
+
+![one markdown card, read into the chart and written back](docs/dataflow.svg)
+
+Every request parses the vault again, so a card you changed in your editor
+shows up on the next reload and there is no index to fall out of step. An edit
+goes the other way as one action against one card: the schema refuses an
+invalid value with a 400 before anything reaches the disk, and the save writes
+a sibling temp file and renames it. A key this codebase has never heard of
+makes the whole round trip untouched.
+
+The same diagram is a page you can explore at
+[dataflow.html](https://stangoldbear.github.io/delivery-asap-hub/dataflow.html),
+with the outward path, the way back and the round trip traced one at a time.
+Its source is [`docs/dataflow.json`](docs/dataflow.json).
+
 ## Architecture
 
 Layers, each with one reason to change; dependencies point inward and only
@@ -209,7 +227,7 @@ Layers, each with one reason to change; dependencies point inward and only
 | `settings` | `settings.toml` parsing, fails fast; presentation constants |
 | `cardmd` | the markdown card format ⇄ Python data |
 | `repository` | the vault on disk, atomic writes |
-| `domain` | dates, tiers, roles, gantt parsing, timeline (pure, clock injected) |
+| `domain` | dates, the priority ramp, roles, gantt parsing, timeline (pure, clock injected) |
 | `schema` | the card schema, declared once |
 | `markup` / `gantt` / `view` | HTML rendering |
 | `api` | mutations, behind a routing table |
@@ -217,10 +235,10 @@ Layers, each with one reason to change; dependencies point inward and only
 
 Two rules worth keeping:
 
-- **Data never reaches the browser inside executable code.** Values travel as
+- Data never reaches the browser inside executable code. Values travel as
   escaped text or escaped `data-*` attributes; `static/app.js` is a real file
   that Python never generates.
-- **Layout metrics live in one place.** `settings.py` emits them as CSS custom
+- Layout metrics live in one place. `settings.py` emits them as CSS custom
   properties; the stylesheet and the resize script read them, they never
   restate them.
 
@@ -230,10 +248,10 @@ Two rules worth keeping:
 python3 -m unittest test_dahub -v
 ```
 
-53 tests, standard library only. The sample vault is the fixture: it contains
+114 tests, standard library only. The sample vault is the fixture: it contains
 a blocked project, a malformed card, a project with no timeline task, notes
 with quotes and newlines, deliberately awkward names and past/future tasks.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

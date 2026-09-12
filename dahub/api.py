@@ -3,7 +3,7 @@ API actions: each handler describes ONLY the mutation to apply.
 
 Loading, serialising and writing the file are centralised in
 `ProjectRepository.mutate`; the fields themselves are declared once in
-`schema.py`. Adding an endpoint means registering a function in `ROUTES` —
+`schema.py`. Adding an endpoint means registering a function in `ROUTES`,
 the server never changes.
 """
 
@@ -293,10 +293,10 @@ def _reorder_projects(repository, params, _now):
     """
     Apply a new ordering: `order` is a list of {id, group} in display order.
 
-    A group is a tier or one of the two display groups, and the drop target
-    decides what happens: dropped onto a tier, a project takes that tier and
-    comes back to life if it was finished or abandoned; dropped onto DONE or
-    DROPPED, it takes that status and keeps the tier it belongs to.
+    A group is the live list or one of the two closing groups, and the drop
+    target decides what happens: dropped into the live list a project comes
+    back to life if it was finished or abandoned; dropped onto DONE or DROPPED
+    it takes that status. Nothing else about the card changes.
 
     `priority` is the project's position over the whole chart, so the number in
     the card is the number on the screen. Only the cards whose position or
@@ -306,7 +306,7 @@ def _reorder_projects(repository, params, _now):
     if not isinstance(order, list):
         raise ApiError("Missing or invalid `order` parameter.")
 
-    groups = set(repository.settings.tiers) | set(settings_module.DISPLAY_GROUPS)
+    groups = {settings_module.LIVE_GROUP} | set(settings_module.DISPLAY_GROUPS)
     position, updated = 0, 0
 
     for item in order:
@@ -340,7 +340,7 @@ def _placement(data, group, rank):
     status = str(data.get('status', 'active')).lower()
     if status in settings_module.DISPLAY_GROUPS:
         status = 'active'          # dragged back up: it is being worked on again
-    return {'tier': group, 'status': status, 'priority': str(rank)}
+    return {'status': status, 'priority': str(rank)}
 
 
 def _write_vault_markdown(repository, params, _now):
@@ -392,7 +392,7 @@ def upload_attachment(repository, project_id, name, data):
     try:
         repository.save_attachment(project_id, name, data)
     except FileExistsError:
-        raise ApiError(f'An attachment named {name} already exists — remove it first.',
+        raise ApiError(f'An attachment named {name} already exists. Remove it first.',
                        status=409)
     except ValueError as exc:
         raise ApiError(str(exc))

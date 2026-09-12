@@ -1,10 +1,9 @@
 # Checkout hardening
 - id: project-11-checkout-hardening
 - type: project
-- tier: tier-9
 - priority: 10
 - status: on-hold
-- intro: Deliberately malformed card: unknown tier, unknown status, non-numeric priority.
+- intro: Deliberately malformed card: unknown status, non-numeric priority.
 - timeline
   - start: 2026-09-28
   - end: 2026-10-14
@@ -27,11 +26,11 @@
   - request: NIMBUS-1300
 - todos
   - todo-project-11-checkout-hardening-1-1788000060
-    - text: Fix the tier and status of this card from the Advanced Edit form
+    - text: Fix the status of this card from the Advanced Edit form
     - deadline:
 
 ## Notes
 
-Fixture for the fallback paths: the unknown tier falls back to the default
-tier, the unknown status keeps its stored value in a disabled option instead
+Fixture for the fallback paths: the unknown status keeps its stored value
+in a disabled option instead
 of being silently rewritten, and the non-numeric priority sorts last.

@@ -1,7 +1,6 @@
 # Default colour for the top banner
 - id: project-8-banner-defaults
 - type: project
-- tier: tier-3
 - priority: 8
 - status: active
 - intro: Let merchandising pick a default background colour per market.

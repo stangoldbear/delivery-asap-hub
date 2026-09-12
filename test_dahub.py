@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Delivery ASAP hub — test suite (stdlib unittest, no dependencies).
+Delivery ASAP hub: test suite (stdlib unittest, no dependencies).
 
     python3 -m unittest test_dahub -v      or      ./test_dahub.py
 
@@ -12,6 +12,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -23,12 +24,14 @@ from datetime import date, datetime, timedelta
 from dahub import gantt, markup, schema, settings as settings_module, view
 from dahub.api import ApiError, delete_attachment, dispatch, upload_attachment
 from dahub.domain import (
-    Timeline, chart_spans, display_group, format_date_long, group_by_display,
-    project_milestones, project_span, project_tasks, resolve_person, resolve_range,
-    tier_key,
+    Timeline, band_position, chart_spans, display_group, format_date_long,
+    group_by_display, project_milestones, project_span, project_tasks, resolve_person,
+    resolve_range,
 )
 from dahub.cardmd import build_card, parse_card
-from dahub.migrate import convert, import_plan, migrate_vault, parse_plan
+from dahub.migrate import (
+    convert, drop_tiers, import_plan, migrate_vault, parse_plan, read_tier_order,
+)
 from dahub.repository import (
     ProjectRepository, csv_to_list, split_cards, write_atomic,
 )
@@ -234,24 +237,105 @@ class MigrationTest(unittest.TestCase):
             self.assertEqual(open(card, encoding='utf-8').read(), converted)
 
 
+class DropTiersTest(unittest.TestCase):
+    """Bringing a 1.1 vault forward: no tier left, one flat run of priorities."""
+
+    # Written in the order a 1.1 chart drew them, which is not the order the
+    # numbers alone imply: tier first, and a finished project at the bottom
+    # whatever its tier says.
+    CARDS = [
+        ('a', 'tier-2', '1', 'active'),
+        ('b', 'tier-1', '2', 'active'),
+        ('c', 'tier-1', '1', 'done'),
+        ('d', 'tier-3', '1', 'active'),
+        ('e', 'tier-1', '1', 'dropped'),
+    ]
+    SETTINGS = ('[[tiers]]\nkey="tier-1"\ntitle="T1"\nrgb=[1,2,3]\n'
+                '[[tiers]]\nkey="tier-2"\ntitle="T2"\nrgb=[4,5,6]\n'
+                '[[tiers]]\nkey="tier-3"\ntitle="T3"\nrgb=[7,8,9]\n')
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.settings_path = os.path.join(self.tmp, 'settings.toml')
+        with open(self.settings_path, 'w', encoding='utf-8') as handle:
+            handle.write(self.SETTINGS)
+        for card_id, tier, priority, status in self.CARDS:
+            with open(os.path.join(self.tmp, f'{card_id}.md'), 'w', encoding='utf-8') as handle:
+                handle.write(f'# Project {card_id}\n- id: {card_id}\n- tier: {tier}\n'
+                             f'- priority: {priority}\n- status: {status}\n')
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _ids_in_order(self):
+        cards = []
+        for name in sorted(os.listdir(self.tmp)):
+            if name.endswith('.md'):
+                with open(os.path.join(self.tmp, name), encoding='utf-8') as handle:
+                    data, _ = parse_card(handle.read())
+                cards.append((int(data['priority']), data['id'], data.get('tier')))
+        return [(card_id, tier) for _, card_id, tier in sorted(cards)]
+
+    def test_a_dry_run_writes_nothing(self):
+        summary = drop_tiers(self.tmp, self.settings_path)
+        self.assertEqual(len(summary['changed']), 5)
+        self.assertFalse(summary['applied'])
+        self.assertEqual(self._ids_in_order()[0], ('a', 'tier-2'))   # untouched on disk
+
+    def test_the_flat_order_is_the_one_the_chart_drew(self):
+        drop_tiers(self.tmp, self.settings_path, apply=True)
+        # tier-1 before tier-2 before tier-3, then done, then dropped — and no
+        # tier survives to say so.
+        self.assertEqual(self._ids_in_order(),
+                         [('b', None), ('a', None), ('d', None), ('c', None), ('e', None)])
+
+    def test_running_it_twice_changes_nothing(self):
+        drop_tiers(self.tmp, self.settings_path, apply=True)
+        after = self._ids_in_order()
+        summary = drop_tiers(self.tmp, self.settings_path, apply=True)
+        self.assertEqual(summary['changed'], [])
+        self.assertEqual(self._ids_in_order(), after)
+
+    def test_an_unknown_key_survives_the_renumbering(self):
+        with open(os.path.join(self.tmp, 'a.md'), 'a', encoding='utf-8') as handle:
+            handle.write('- private_note: keep me\n')
+        drop_tiers(self.tmp, self.settings_path, apply=True)
+        with open(os.path.join(self.tmp, 'a.md'), encoding='utf-8') as handle:
+            data, _ = parse_card(handle.read())
+        self.assertEqual(data['private_note'], 'keep me')
+
+    def test_without_a_tiers_table_the_cards_imply_the_order(self):
+        """A 1.2 settings.toml no longer declares tiers; the vault still ranks."""
+        with open(self.settings_path, 'w', encoding='utf-8') as handle:
+            handle.write('[app]\ntitle="X"\n')
+        drop_tiers(self.tmp, self.settings_path, apply=True)
+        self.assertEqual([card_id for card_id, _ in self._ids_in_order()],
+                         ['b', 'a', 'd', 'c', 'e'])
+
+    def test_the_retired_table_is_read_in_declaration_order(self):
+        self.assertEqual(read_tier_order(self.settings_path),
+                         ['tier-1', 'tier-2', 'tier-3'])
+        self.assertEqual(read_tier_order(os.path.join(self.tmp, 'nope.toml')), [])
+
+
 class SettingsTest(unittest.TestCase):
     def test_sample_settings_load(self):
         config = sample_settings()
-        self.assertEqual(config.default_tier, 'tier-3')
         self.assertIn('iOS', config.squads)
+        self.assertEqual(config.title, 'Delivery ASAP hub')
 
-    def test_unknown_default_tier_is_rejected(self):
+    def test_a_malformed_table_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, 'bad.toml')
             with open(path, 'w') as handle:
                 handle.write('[locale]\nmonths=["a","b","c","d","e","f","g","h","i","j","k","l"]\n'
                              'month_abbr=["a","b","c","d","e","f","g","h","i","j","k","l"]\n'
-                             '[defaults]\ntier="nope"\n[[tiers]]\nkey="t1"\ntitle="T"\nrgb=[1,2,3]\n')
+                             '[[roles]]\nkey="r1"\nlabel="R"\n')
             with self.assertRaises(settings_module.SettingsError):
                 settings_module.load(path)
 
     def test_a_local_file_layers_over_the_shipped_one(self):
-        """A two-line override must not have to restate tiers, squads and roles."""
+        """A two-line override must not have to restate the squads and roles."""
         original = settings_module.LOCAL_SETTINGS_PATH
         with tempfile.TemporaryDirectory() as tmp:
             local = os.path.join(tmp, 'settings.local.toml')
@@ -266,16 +350,17 @@ class SettingsTest(unittest.TestCase):
         self.assertTrue(merged.projects_dir.endswith('sample-vault/02-projects/active'))
         self.assertEqual(merged.title, 'Local name')
         # everything the local file stayed silent about is inherited
-        self.assertEqual(list(merged.tiers), ['tier-1', 'tier-2', 'tier-3'])
         self.assertIn('iOS', merged.squads)
+        self.assertEqual(merged.owner,
+                         settings_module.load(settings_module.DEFAULT_SETTINGS_PATH).owner)
         self.assertEqual(merged.subtitle,
                          settings_module.load(settings_module.DEFAULT_SETTINGS_PATH).subtitle)
 
     def test_a_list_in_a_local_file_replaces_it_whole(self):
-        base = {'tiers': [{'key': 'a'}, {'key': 'b'}], 'app': {'title': 'T', 'owner': 'O'}}
-        merged = settings_module._overlay(base, {'tiers': [{'key': 'c'}],
+        base = {'roles': [{'key': 'a'}, {'key': 'b'}], 'app': {'title': 'T', 'owner': 'O'}}
+        merged = settings_module._overlay(base, {'roles': [{'key': 'c'}],
                                                  'app': {'title': 'X'}})
-        self.assertEqual(merged['tiers'], [{'key': 'c'}])
+        self.assertEqual(merged['roles'], [{'key': 'c'}])
         self.assertEqual(merged['app'], {'title': 'X', 'owner': 'O'})
 
     def test_missing_file_is_reported(self):
@@ -323,11 +408,11 @@ class RepositoryTest(VaultTestCase):
         leftovers = [name for name in os.listdir(self.vault) if name.startswith('.tmp-')]
         self.assertEqual(leftovers, [])
 
-    def test_hand_written_card_keeps_its_tier_through_a_save(self):
+    def test_hand_written_card_survives_a_save_untouched(self):
         """The card with inline comments must survive the parse → save cycle."""
         self.assertTrue(self.repo.mutate('project-2-eco-labels', lambda data: None))
         data, _ = self.repo.load('project-2-eco-labels')
-        self.assertEqual(data['tier'], 'tier-1')
+        self.assertEqual(data['priority'], '2')
         self.assertEqual(data['status'], 'blocked')
         self.assertIn('Regulatory requirement', data['intro'])
         self.assertIn('\n', data['intro'])
@@ -417,9 +502,19 @@ class DomainTest(unittest.TestCase):
         self.assertEqual(format_date_long('mid October', self.settings), 'mid October')
         self.assertEqual(format_date_long('', self.settings), '')
 
-    def test_unknown_tier_falls_back_to_the_default(self):
-        self.assertEqual(tier_key({'tier': 'tier-9'}, self.settings), 'tier-3')
-        self.assertEqual(tier_key({}, self.settings), 'tier-3')
+    def test_the_ramp_runs_end_to_end_over_the_list(self):
+        self.assertEqual(band_position(0, 10), 0.0)
+        self.assertEqual(band_position(9, 10), 100.0)
+        self.assertAlmostEqual(band_position(5, 11), 50.0)
+
+    def test_the_only_project_there_is_sits_at_the_top_of_the_ramp(self):
+        """A one-project list is not a last place: it is a first one."""
+        self.assertEqual(band_position(0, 1), 0.0)
+        self.assertEqual(band_position(0, 0), 0.0)
+
+    def test_the_ramp_never_runs_past_its_end(self):
+        self.assertEqual(band_position(99, 10), 100.0)
+        self.assertEqual(band_position(-4, 10), 0.0)
 
     def test_a_person_resolves_by_name_and_still_by_the_old_prefix(self):
         self.assertEqual(resolve_person('Rita Levi', self.settings),
@@ -560,20 +655,20 @@ class DomainTest(unittest.TestCase):
         far = datetime(2030, 1, 1)
         self.assertIsNone(timeline.geometry(far, far))
 
-    def test_grouping_keeps_the_declared_order_and_ends_with_the_two_groups(self):
+    def test_grouping_is_the_live_list_and_then_the_two_closing_groups(self):
         grouped = group_by_display(
-            [{'tier': 'tier-9'}, {'tier': 'tier-1'},
-             {'tier': 'tier-1', 'status': 'done'}, {'tier': 'tier-2', 'status': 'dropped'}],
+            [{'status': 'active'}, {'status': 'on-hold'},
+             {'status': 'done'}, {'status': 'dropped'}],
             self.settings)
-        self.assertEqual(list(grouped), list(self.settings.tiers) + ['done', 'dropped'])
-        self.assertEqual(len(grouped['tier-3']), 1)      # the unknown tier lands here
+        self.assertEqual(list(grouped), ['live', 'done', 'dropped'])
+        # An unrecognised status is still work in flight, not an archive.
+        self.assertEqual(len(grouped['live']), 2)
         self.assertEqual(len(grouped['done']), 1)
         self.assertEqual(len(grouped['dropped']), 1)
 
-    def test_a_finished_project_keeps_the_tier_it_belongs_to(self):
-        card = {'tier': 'tier-1', 'status': 'done'}
-        self.assertEqual(display_group(card, self.settings), 'done')
-        self.assertEqual(tier_key(card, self.settings), 'tier-1')
+    def test_a_status_is_the_only_thing_that_files_a_project(self):
+        self.assertEqual(display_group({'status': 'done'}, self.settings), 'done')
+        self.assertEqual(display_group({}, self.settings), 'live')
 
 
 class SchemaAndApiTest(VaultTestCase):
@@ -617,9 +712,9 @@ class SchemaAndApiTest(VaultTestCase):
 
     def test_readonly_fields_cannot_be_written(self):
         dispatch(self.repo, self.PROJECT, 'advanced-update',
-                 {'tier': 'tier-3', 'priority': '99'}, now=NOW)
+                 {'id': 'renamed', 'priority': '99'}, now=NOW)
         after, _ = self.repo.load(self.PROJECT)
-        self.assertEqual(after['tier'], 'tier-1')
+        self.assertEqual(after['id'], self.PROJECT)
         self.assertEqual(after['priority'], '1')
 
     def test_todo_lifecycle(self):
@@ -731,11 +826,11 @@ class SchemaAndApiTest(VaultTestCase):
                      {'date': 'mid December', 'text': 'someday'}, now=NOW)
 
     def test_reorder_numbers_projects_over_the_whole_chart(self):
-        """`priority` is a position in the chart, not a rank inside a tier."""
+        """`priority` is a position in one flat list, and the list is the chart."""
         result = dispatch(self.repo, '_batch', 'reorder', {'order': [
-            {'id': 'project-3-home-redesign', 'group': 'tier-1'},
-            {'id': self.PROJECT, 'group': 'tier-1'},
-            {'id': 'project-8-banner-defaults', 'group': 'tier-3'},
+            {'id': 'project-3-home-redesign', 'group': 'live'},
+            {'id': self.PROJECT, 'group': 'live'},
+            {'id': 'project-8-banner-defaults', 'group': 'live'},
         ]}, now=NOW)
         self.assertEqual(result['updated'], 3)
         self.assertEqual(self.repo.load('project-3-home-redesign')[0]['priority'], '1')
@@ -747,13 +842,12 @@ class SchemaAndApiTest(VaultTestCase):
                  {'order': [{'id': self.PROJECT, 'group': 'done'}]}, now=NOW)
         card = self.repo.load(self.PROJECT)[0]
         self.assertEqual(card['status'], 'done')
-        self.assertEqual(card['tier'], 'tier-1')          # the tier is left untouched
+        self.assertNotIn('tier', card)                    # nothing left to carry
 
         dispatch(self.repo, '_batch', 'reorder',
-                 {'order': [{'id': self.PROJECT, 'group': 'tier-2'}]}, now=NOW)
+                 {'order': [{'id': self.PROJECT, 'group': 'live'}]}, now=NOW)
         card = self.repo.load(self.PROJECT)[0]
         self.assertEqual(card['status'], 'active')        # back to being worked on
-        self.assertEqual(card['tier'], 'tier-2')
 
     def test_reorder_writes_only_what_moved(self):
         order = [{'id': project['id'], 'group': display_group(project, self.settings)}
@@ -765,7 +859,7 @@ class SchemaAndApiTest(VaultTestCase):
     def test_reorder_refuses_an_unknown_group(self):
         with self.assertRaises(ApiError):
             dispatch(self.repo, '_batch', 'reorder',
-                     {'order': [{'id': self.PROJECT, 'group': 'tier-42'}]}, now=NOW)
+                     {'order': [{'id': self.PROJECT, 'group': 'tier-1'}]}, now=NOW)
 
     def test_unknown_action_and_unknown_project(self):
         for project_id, action in ((self.PROJECT, 'nope'), ('ghost', 'update')):
@@ -851,10 +945,21 @@ class ViewTest(unittest.TestCase):
         self.projects = self.repo.list_all()
         self.html = view.render_page(self.projects, today=TODAY, settings=self.settings)
 
-    def test_page_renders_every_tier_and_project(self):
+    def test_the_page_ranks_every_project_and_names_the_two_closing_groups(self):
         for project in self.projects:
             self.assertIn(f'data-proj-id="{project["id"]}"', self.html)
-        self.assertIn('TIER 1 — CORE &amp; COMPLIANCE', self.html)
+        # No heading over the live list — it is the chart — and one over each of
+        # the two groups a project is dropped onto to close it.
+        self.assertNotIn('data-group="live"', self.html)
+        self.assertIn('data-group="done"', self.html)
+        self.assertIn('data-group="dropped"', self.html)
+
+    def test_the_ramp_runs_from_the_top_of_the_list_to_the_bottom(self):
+        positions = re.findall(r'project-main-row[^>]*--at:([\d.]+)%', self.html)
+        self.assertEqual(positions[0], '0.00')
+        # Every closed project sits at the cold end, where last place would be.
+        self.assertEqual(positions[-1], '100.00')
+        self.assertEqual(sorted(positions, key=float), positions)
 
     def test_special_characters_are_escaped(self):
         self.assertIn('Designer&#x27;s name &amp; brand page &quot;phase 2&quot;', self.html)
@@ -863,18 +968,18 @@ class ViewTest(unittest.TestCase):
     def test_link_counts_match_the_stored_values(self):
         """An empty section used to claim `(1)` because of its placeholder row."""
         card = next(p for p in self.projects if p['id'] == 'project-6-designer-name')
-        detail = view.render_detail_row(card, 'tier-2', self.settings)
+        detail = view.render_detail_row(card, 'live', settings=self.settings)
         self.assertIn('Confluence (<span data-count="confluence_links">0</span>)', detail)
         self.assertIn('Epics (<span data-count="jira_epics">1</span>)', detail)
 
     def test_unknown_status_is_not_silently_replaced(self):
         card = next(p for p in self.projects if p['id'] == 'project-11-checkout-hardening')
-        detail = view.render_detail_row(card, 'tier-3', self.settings)
+        detail = view.render_detail_row(card, 'live', settings=self.settings)
         self.assertIn('on-hold (invalid)', detail)
 
     def test_dangerous_link_schemes_are_dropped(self):
         card = {'id': 'x', 'confluence': ['javascript:alert(1)']}
-        detail = view.render_detail_row(card, 'tier-1', self.settings)
+        detail = view.render_detail_row(card, 'live', settings=self.settings)
         self.assertNotIn('href="javascript:', detail)
         self.assertNotIn('\U0001F517 OPEN', detail)                 # no link button at all
         self.assertIn('value="javascript:alert(1)"', detail)   # kept as text, not as a link
@@ -882,7 +987,7 @@ class ViewTest(unittest.TestCase):
     def test_project_without_tasks_has_a_disabled_caret(self):
         chart = gantt.render(self.projects,
                              Timeline(self.spans, settings=self.settings, today=TODAY),
-                             detail_row=lambda project, tier: '', settings=self.settings)
+                             detail_row=lambda project, group, at: '', settings=self.settings)
         button = chart.split('id="btn-toggle-proj-project-7-menu-endpoint"')[1].split('>')[0]
         self.assertIn('data-project="project-7-menu-endpoint"', button)
         self.assertIn('disabled', button)
@@ -899,13 +1004,13 @@ class ViewTest(unittest.TestCase):
 
     def test_attachments_render_with_size_and_a_remove_button(self):
         card = next(p for p in self.projects if p['id'] == 'project-1-navigation-menu')
-        detail = view.render_detail_row(card, 'tier-1', self.settings)
+        detail = view.render_detail_row(card, 'live', settings=self.settings)
         self.assertIn('Attachments (2)', detail)
         self.assertIn('href="/api/project/project-1-navigation-menu/attachments/kickoff-notes.md"',
                       detail)
         self.assertIn('data-action="attachment-delete"', detail)
         self.assertIn('data-name="menu-mockup.png"', detail)
-        empty = view.render_detail_row({'id': 'x'}, 'tier-1', self.settings)
+        empty = view.render_detail_row({'id': 'x'}, 'live', settings=self.settings)
         self.assertIn('No file attached.', empty)
         self.assertEqual(markup.human_size(1536), '1.5 KB')
 
@@ -1112,7 +1217,9 @@ class ServerTest(VaultTestCase):
         self.assertEqual(status, 200)
         self.assertIn('Structure', body)
         self.assertIn('id="vault-markdown"', body)
-        self.assertIn('TIER 1 — CORE &amp; COMPLIANCE', body)
+        # The live list is the tree; only a closing group announces itself.
+        self.assertIn('>DONE ', body)
+        self.assertIn('>DROPPED ', body)
 
         status, snapshot, headers = self.get('/api/vault/markdown')
         self.assertEqual(status, 200)
